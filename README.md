@@ -1,7 +1,8 @@
 # UISP Automation Webhooks
 
 Internal webhooks that Fibersmith Vision workflows call to perform actions in UISP.  
-All device endpoints require a shared secret plus MAC + management IP.
+All device endpoints require a shared secret plus MAC + management IP.  
+When provided, the Vision Workflow Process ID is logged and returned in the response.
 
 **Base URL:** `https://vision-test-yz19.onrender.com`
 
@@ -29,5 +30,6 @@ The secret is set in the Render environment variable `WEBHOOK_SECRET`.
 - `mac` — Device MAC address
 - `ip` — Management IP address
 - `secret` — Shared webhook secret
+- `workflow_id` — (optional) Vision Workflow Process ID. Logged on every request and included in the JSON response.
 
 ### Example calls
