@@ -126,8 +126,6 @@ def log_request(endpoint: str, workflow_id: str, mac: str, ip: str, result: str,
         result,
         detail,
     )
-
-
 @app.api_route("/remove-cpe", methods=["GET", "POST"])
 async def remove_cpe(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
     check_secret(request, x_webhook_secret)
@@ -410,6 +408,12 @@ async def signal_history(request: Request, x_webhook_secret: str | None = Header
             "interval": interval,
             "statistics": stats,
         }
+    except HTTPException as e:
+        log_request("/signal-history", workflow_id, wanted_mac, wanted_ip, "error", str(e.detail))
+        raise
+    except requests.RequestException as e:
+        log_request("/signal-history", workflow_id, wanted_mac, wanted_ip, "error", f"UISP API error: {e}")
+        raise HTTPException(502, f"UISP API error: {e}")
     except Exception as e:
         log_request("/signal-history", workflow_id, wanted_mac, wanted_ip, "error", str(e))
         raise HTTPException(500, str(e))
@@ -442,9 +446,9 @@ async def rename_cpe(request: Request, x_webhook_secret: str | None = Header(Non
         device_id = str(ident.get("id") or "")
         old_name = ident.get("name") or ""
 
-        patch_url = f"{UISP_BASE}/devices/{device_id}"
-        payload = {"identification": {"name": new_name}}
-        pr = requests.patch(patch_url, headers=HEADERS, json=payload, timeout=45)
+        put_url = f"{UISP_BASE}/devices/{device_id}/system"
+        payload = {"name": new_name}
+        pr = requests.put(put_url, headers=HEADERS, json=payload, timeout=45)
         if pr.status_code not in (200, 204):
             log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", f"Rename failed {pr.status_code}")
             raise HTTPException(pr.status_code, f"UISP rename failed: {pr.text}")
