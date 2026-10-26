@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
 UISP automation webhooks for Vision.
-Endpoints:
-- /remove-cpe (optional delete_site=true)
-- /reboot-cpe (checks UISP can talk to device first)
-- /outage-check
-- /device-status
-- /signal-history
-- /rename-cpe
-Requires shared secret. Logs workflow_id when provided.
 """
 
 import os
@@ -65,9 +57,7 @@ def clean_name(raw: str) -> str:
     s = str(raw)
     s = s.replace("&", "and")
     s = s.replace("/", "-").replace("\\", "-")
-    # Keep letters, numbers, spaces, hyphens
     s = re.sub(r"[^a-zA-Z0-9 \-]", "", s)
-    # Collapse multiple spaces/hyphens
     s = re.sub(r"\s+", " ", s)
     s = re.sub(r"-+", "-", s)
     s = s.strip()
@@ -139,10 +129,7 @@ def log_request(endpoint: str, workflow_id: str, mac: str, ip: str, result: str,
 
 
 @app.api_route("/remove-cpe", methods=["GET", "POST"])
-async def remove_cpe(
-    request: Request,
-    x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret"),
-):
+async def remove_cpe(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
     check_secret(request, x_webhook_secret)
     data = dict(request.query_params) if request.method == "GET" else await request.json()
     workflow_id = data.get("workflow_id") or ""
@@ -216,10 +203,7 @@ async def remove_cpe(
 
 
 @app.api_route("/reboot-cpe", methods=["GET", "POST"])
-async def reboot_cpe(
-    request: Request,
-    x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret"),
-):
+async def reboot_cpe(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
     check_secret(request, x_webhook_secret)
     data = dict(request.query_params) if request.method == "GET" else await request.json()
     workflow_id = data.get("workflow_id") or ""
@@ -272,10 +256,7 @@ async def reboot_cpe(
 
 
 @app.api_route("/outage-check", methods=["GET", "POST"])
-async def outage_check(
-    request: Request,
-    x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret"),
-):
+async def outage_check(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
     check_secret(request, x_webhook_secret)
     data = dict(request.query_params) if request.method == "GET" else await request.json()
     workflow_id = data.get("workflow_id") or ""
@@ -332,10 +313,7 @@ async def outage_check(
 
 
 @app.api_route("/device-status", methods=["GET", "POST"])
-async def device_status(
-    request: Request,
-    x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret"),
-):
+async def device_status(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
     check_secret(request, x_webhook_secret)
     data = dict(request.query_params) if request.method == "GET" else await request.json()
     workflow_id = data.get("workflow_id") or ""
@@ -398,10 +376,7 @@ async def device_status(
 
 
 @app.api_route("/signal-history", methods=["GET", "POST"])
-async def signal_history(
-    request: Request,
-    x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret"),
-):
+async def signal_history(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
     check_secret(request, x_webhook_secret)
     data = dict(request.query_params) if request.method == "GET" else await request.json()
     workflow_id = data.get("workflow_id") or ""
@@ -422,7 +397,6 @@ async def signal_history(
 
         stats_url = f"{UISP_BASE}/devices/{device_id}/statistics"
         sr = requests.get(stats_url, headers=HEADERS, timeout=45, params={"interval": interval})
-
         stats = sr.json() if sr.status_code == 200 else {"note": "Statistics endpoint returned non-200", "status_code": sr.status_code}
 
         log_request("/signal-history", workflow_id, wanted_mac, wanted_ip, "success", f"interval={interval}")
@@ -436,22 +410,13 @@ async def signal_history(
             "interval": interval,
             "statistics": stats,
         }
-    except HTTPException as e:
-        log_request("/signal-history", workflow_id, wanted_mac, wanted_ip, "error", str(e.detail))
-        raise
-    except requests.RequestException as e:
-        log_request("/signal-history", workflow_id, wanted_mac, wanted_ip, "error", f"UISP API error: {e}")
-        raise HTTPException(502, f"UISP API error: {e}")
     except Exception as e:
         log_request("/signal-history", workflow_id, wanted_mac, wanted_ip, "error", str(e))
         raise HTTPException(500, str(e))
 
 
 @app.api_route("/rename-cpe", methods=["GET", "POST"])
-async def rename_cpe(
-    request: Request,
-    x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret"),
-):
+async def rename_cpe(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
     check_secret(request, x_webhook_secret)
     data = dict(request.query_params) if request.method == "GET" else await request.json()
     workflow_id = data.get("workflow_id") or ""
@@ -477,7 +442,6 @@ async def rename_cpe(
         device_id = str(ident.get("id") or "")
         old_name = ident.get("name") or ""
 
-        # Update name via UISP API
         patch_url = f"{UISP_BASE}/devices/{device_id}"
         payload = {"identification": {"name": new_name}}
         pr = requests.patch(patch_url, headers=HEADERS, json=payload, timeout=45)
@@ -488,3 +452,25 @@ async def rename_cpe(
         log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "success", f"old={old_name} new={new_name}")
         return {
             "success": True,
+            "message": "Device renamed",
+            "workflow_id": workflow_id,
+            "device_id": device_id,
+            "mac": wanted_mac,
+            "ip": wanted_ip,
+            "old_name": old_name,
+            "new_name": new_name,
+        }
+    except HTTPException as e:
+        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", str(e.detail))
+        raise
+    except requests.RequestException as e:
+        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", f"UISP API error: {e}")
+        raise HTTPException(502, f"UISP API error: {e}")
+    except Exception as e:
+        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", str(e))
+        raise HTTPException(500, str(e))
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
