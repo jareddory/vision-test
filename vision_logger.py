@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 UISP CPE removal webhook for Vision.
-Accepts GET or POST with mac + ip.
+Requires a shared secret (header or query param).
 """
 
 import os
@@ -10,16 +10,19 @@ import ipaddress
 from typing import List, Any
 
 import requests
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
 
 app = FastAPI(title="UISP CPE Remover")
 
 UISP_BASE = os.getenv("UISP_BASE_URL", "https://btwi.uisp.com/nms/api/v2.1").rstrip("/")
 UISP_TOKEN = os.getenv("UISP_TOKEN")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
 if not UISP_TOKEN:
     raise RuntimeError("UISP_TOKEN environment variable is required")
+if not WEBHOOK_SECRET:
+    raise RuntimeError("WEBHOOK_SECRET environment variable is required")
 
 HEADERS = {
     "x-auth-token": UISP_TOKEN,
@@ -56,8 +59,20 @@ def device_ips(device: dict) -> List[str]:
     return list({normalize_ip(a) for a in addresses if normalize_ip(a)})
 
 
+def check_secret(request: Request, header_secret: str | None = None):
+    # Accept secret from header or query parameter
+    provided = header_secret or request.query_params.get("secret")
+    if not provided or provided != WEBHOOK_SECRET:
+        raise HTTPException(401, "Invalid or missing webhook secret")
+
+
 @app.api_route("/remove-cpe", methods=["GET", "POST"])
-async def remove_cpe(request: Request):
+async def remove_cpe(
+    request: Request,
+    x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret"),
+):
+    check_secret(request, x_webhook_secret)
+
     # Support both query string (GET) and JSON body (POST)
     if request.method == "GET":
         data = dict(request.query_params)
