@@ -33,3 +33,40 @@ The secret is set in the Render environment variable `WEBHOOK_SECRET`.
 - `workflow_id` — (optional) Vision Workflow Process ID. Logged on every request and included in the JSON response.
 
 ### Example calls
+Remove CPEhttps://vision-test-yz19.onrender.com/remove-cpe?mac=70:A7:41:44:AC:10&ip=172.20.170.196&secret=YOUR_SECRET&workflow_id=WF-12345Remove CPE and site if emptyhttps://vision-test-yz19.onrender.com/remove-cpe?mac=70:A7:41:44:AC:10&ip=172.20.170.196&secret=YOUR_SECRET&delete_site=true&workflow_id=WF-12345Reboothttps://vision-test-yz19.onrender.com/reboot-cpe?mac=70:A7:41:44:AC:10&ip=172.20.170.196&secret=YOUR_SECRET&workflow_id=WF-12345Outage checkhttps://vision-test-yz19.onrender.com/outage-check?mac=70:A7:41:44:AC:10&ip=172.20.170.196&secret=YOUR_SECRET&workflow_id=WF-12345Device statushttps://vision-test-yz19.onrender.com/device-status?mac=70:A7:41:44:AC:10&ip=172.20.170.196&secret=YOUR_SECRET&workflow_id=WF-12345Signal historyhttps://vision-test-yz19.onrender.com/signal-history?mac=70:A7:41:44:AC:10&ip=172.20.170.196&secret=YOUR_SECRET&interval=day&workflow_id=WF-12345text
+
+## Logging
+
+Every device endpoint logs a line in this format (visible in Render Logs):
+workflow_id=WF-12345 endpoint=/reboot-cpe mac=70A74144AC10 ip=172.20.170.196 result=success
+
+On errors the `result` is `error` and a short detail is included.  
+The same `workflow_id` is also returned in the JSON response body.
+
+## Safety checks
+
+All device endpoints enforce:
+- MAC must uniquely match exactly one device
+- Management IP must match one of the IPs reported by UISP
+- Infrastructure devices (AP, backhaul, gateway, router, switch, tower, etc.) are refused
+- Fresh re-fetch of the device before destructive actions
+
+## Environment variables (Render)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `UISP_TOKEN` | Yes | UISP NMS API token with appropriate permissions |
+| `WEBHOOK_SECRET` | Yes | Shared secret Vision must send |
+| `UISP_BASE_URL` | No | Defaults to `https://btwi.uisp.com/nms/api/v2.1` |
+
+## Deployment
+
+Deployed on Render from this repository.  
+Build command: `pip install -r requirements.txt`  
+Start command: `uvicorn vision_logger:app --host 0.0.0.0 --port $PORT`
+
+## Notes
+
+- Signal history responses can be large (especially with `interval=week`). Prefer `day` unless you need the longer range.
+- Reboot will refuse to run if UISP currently shows the device as unreachable, and returns a plain-language message suitable for CSRs.
+- Site deletion (`delete_site=true`) only occurs if the site has no remaining devices after the CPE is removed.
