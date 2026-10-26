@@ -51,19 +51,6 @@ def normalize_ip(value: Any) -> str:
         return ""
 
 
-def clean_name(raw: str) -> str:
-    if not raw:
-        return ""
-    s = str(raw)
-    s = s.replace("&", "and")
-    s = s.replace("/", "-").replace("\\", "-")
-    s = re.sub(r"[^a-zA-Z0-9 \-]", "", s)
-    s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"-+", "-", s)
-    s = s.strip()
-    return s[:32]
-
-
 def device_ips(device: dict) -> List[str]:
     addresses = []
     if device.get("ipAddress"):
@@ -416,62 +403,6 @@ async def signal_history(request: Request, x_webhook_secret: str | None = Header
         raise HTTPException(502, f"UISP API error: {e}")
     except Exception as e:
         log_request("/signal-history", workflow_id, wanted_mac, wanted_ip, "error", str(e))
-        raise HTTPException(500, str(e))
-
-
-@app.api_route("/rename-cpe", methods=["GET", "POST"])
-async def rename_cpe(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
-    check_secret(request, x_webhook_secret)
-    data = dict(request.query_params) if request.method == "GET" else await request.json()
-    workflow_id = data.get("workflow_id") or ""
-    wanted_mac = normalize_mac(data.get("mac"))
-    wanted_ip = normalize_ip(data.get("ip"))
-    raw_name = data.get("name") or ""
-
-    if not re.fullmatch(r"[A-F0-9]{12}", wanted_mac):
-        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", "Invalid MAC")
-        raise HTTPException(400, "Invalid or missing MAC")
-    if not wanted_ip:
-        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", "Invalid IP")
-        raise HTTPException(400, "Invalid or missing IP")
-
-    new_name = clean_name(raw_name)
-    if not new_name:
-        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", "Invalid name")
-        raise HTTPException(400, "Invalid or empty name after cleaning")
-
-    try:
-        device = find_device_by_mac_ip(wanted_mac, wanted_ip)
-        ident = device.get("identification", {})
-        device_id = str(ident.get("id") or "")
-        old_name = ident.get("name") or ""
-
-        put_url = f"{UISP_BASE}/devices/{device_id}/system"
-        payload = {"name": new_name}
-        pr = requests.put(put_url, headers=HEADERS, json=payload, timeout=45)
-        if pr.status_code not in (200, 204):
-            log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", f"Rename failed {pr.status_code}")
-            raise HTTPException(pr.status_code, f"UISP rename failed: {pr.text}")
-
-        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "success", f"old={old_name} new={new_name}")
-        return {
-            "success": True,
-            "message": "Device renamed",
-            "workflow_id": workflow_id,
-            "device_id": device_id,
-            "mac": wanted_mac,
-            "ip": wanted_ip,
-            "old_name": old_name,
-            "new_name": new_name,
-        }
-    except HTTPException as e:
-        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", str(e.detail))
-        raise
-    except requests.RequestException as e:
-        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", f"UISP API error: {e}")
-        raise HTTPException(502, f"UISP API error: {e}")
-    except Exception as e:
-        log_request("/rename-cpe", workflow_id, wanted_mac, wanted_ip, "error", str(e))
         raise HTTPException(500, str(e))
 
 
