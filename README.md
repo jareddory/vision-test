@@ -70,3 +70,7 @@ Start command: `uvicorn vision_logger:app --host 0.0.0.0 --port $PORT`
 - Signal history responses can be large (especially with `interval=week`). Prefer `day` unless you need the longer range.
 - Reboot will refuse to run if UISP currently shows the device as unreachable, and returns a plain-language message suitable for CSRs.
 - Site deletion (`delete_site=true`) only occurs if the site has no remaining devices after the CPE is removed.
+
+- These automations are actively being used in the following WFP's:
+  - Wireless Cancelation - UISP Reboot CPE & Remove CPE from UISP
+  - 
