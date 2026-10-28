@@ -26,69 +26,7 @@ Every endpoint returns:
 }
 Vision manual-task setup (all endpoints)
 
-
-
-
-
-
-
-
-
-
-
-
 Webhook Response FieldWebhook Response ValueresultfailedWhen result equals failed, create the manual task.Endpoints
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 EndpointMethodDescriptionKey Parameters/remove-cpeGET/POSTDelete a CPE. Optionally delete empty site.mac, ip, delete_site=true/reboot-cpeGET/POSTReboot a CPE (refuses if unreachable).mac, ip/cancel-cpeGET/POSTFor cancellations. If offline → done. If online → reboot. Falls back to partial name match when IP doesn't match.mac, name (recommended), ip (optional)/outage-checkGET/POSTCheck if device is offline or in an outage.mac, ip/device-statusGET/POSTDetailed status (uptime, CPU, RAM, firmware, etc.).mac, ip/signal-historyGET/POSTSignal / wireless statistics.mac, ip, interval/healthGETHealth check (no auth).—Common parameters
 mac — Device MAC address
@@ -119,29 +57,6 @@ Infrastructure devices (AP, backhaul, gateway, etc.) are refused
 /remove-cpe and /reboot-cpe still require matching management IP
 Fresh re-fetch before destructive actions on remove
 Environment variables (Render)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 VariableRequiredDescriptionUISP_TOKENYesUISP NMS API tokenWEBHOOK_SECRETYesShared secret Vision must sendUISP_BASE_URLNoDefaults to https://btwi.uisp.com/nms/api/v2.1DeploymentBuild: pip install -r requirements.txt
 
