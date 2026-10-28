@@ -61,8 +61,8 @@ def find_device_strict(mac: str, ip: str) -> dict:
         raise HTTPException(403, "Potential infrastructure device — refused")
     return matches[0]
 
-def find_device_cancel(mac: str, ip: str, name: str) -> tuple[dict, str]:
-    """Returns (device, match_method). Tries MAC+IP first, then MAC+partial name."""
+def find_device_cancel(mac: str, ip: str, name: str) -> tuple:
+    """Returns (device, match_method). Tries MAC+IP first, then MAC+name (handles reversed/no-space names)."""
     devices = get_devices()
     mac_matches = [d for d in devices if norm_mac(d.get("identification", {}).get("mac")) == mac]
     if len(mac_matches) != 1:
@@ -70,14 +70,21 @@ def find_device_cancel(mac: str, ip: str, name: str) -> tuple[dict, str]:
     device = mac_matches[0]
     if is_infra(device):
         raise HTTPException(403, "Potential infrastructure device — refused")
-    # Try IP match
+    # Try IP match first
     if ip and ip in device_ips(device):
         return device, "mac+ip"
-    # Fallback to partial name
+    # Fallback: name match (handles sohncindy vs Cindy Sohn, spaces, reversed)
     if name:
-        dev_name = str(device.get("identification", {}).get("name") or "").lower()
-        if name.lower() in dev_name or dev_name in name.lower():
-            return device, "mac+name"
+        dev_name = re.sub(r"[^a-z0-9]", "", str(device.get("identification", {}).get("name") or "").lower())
+        input_clean = re.sub(r"[^a-z0-9]", "", name.lower())
+        if dev_name and input_clean:
+            if input_clean in dev_name or dev_name in input_clean:
+                return device, "mac+name"
+            # Check for any shared 4+ character chunk (covers reversed names)
+            for size in range(min(len(input_clean), 8), 3, -1):
+                for i in range(len(input_clean) - size + 1):
+                    if input_clean[i:i+size] in dev_name:
+                        return device, "mac+name"
     raise HTTPException(409, "MAC matched but neither IP nor name matched")
 
 def log_req(ep, wid, mac, ip, result, detail=""):
@@ -93,6 +100,7 @@ def fail(message: str, status=400, extra: dict = None):
     if extra:
         body.update(extra)
     return JSONResponse(body, status_code=status)
+
 @app.api_route("/remove-cpe", methods=["GET", "POST"])
 async def remove_cpe(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
     check_secret(request, x_webhook_secret)
@@ -185,28 +193,44 @@ async def cancel_cpe(request: Request, x_webhook_secret: str | None = Header(Non
         return fail("Invalid or missing MAC", 400, {"workflow_id": wid})
     try:
         dev, method = find_device_cancel(mac, ip, name)
-        did = str(dev.get("identification", {}).get("id") or "")
+        ident = dev.get("identification", {})
+        did = str(ident.get("id") or "")
+        site_id = str(ident.get("site", {}).get("id") or "") if ident.get("site") else None
         status = str(dev.get("overview", {}).get("status") or dev.get("status") or "").lower()
         offline = status in ("disconnected", "offline", "inactive", "unreachable", "down", "")
-        if offline:
-            log_req("/cancel-cpe", wid, mac, ip, "success", f"already_offline method={method}")
-            return ok({
-                "message": "CPE is already offline — no reboot needed",
-                "action": "already_offline",
-                "workflow_id": wid, "device_id": did, "mac": mac,
-                "name": dev.get("identification", {}).get("name"),
-                "status": status, "match_method": method
-            })
-        rr = requests.post(f"{UISP_BASE}/devices/{did}/reboot", headers=HEADERS, timeout=45)
-        if rr.status_code not in (200, 202, 204):
-            return fail(f"Reboot command failed: {rr.text}", rr.status_code, {"workflow_id": wid})
-        log_req("/cancel-cpe", wid, mac, ip, "success", f"reboot_issued method={method}")
+        action = "already_offline"
+        if not offline:
+            rr = requests.post(f"{UISP_BASE}/devices/{did}/reboot", headers=HEADERS, timeout=45)
+            if rr.status_code not in (200, 202, 204):
+                return fail(f"Reboot command failed: {rr.text}", rr.status_code, {"workflow_id": wid})
+            action = "reboot_issued"
+        # Remove the device
+        dr = requests.delete(f"{UISP_BASE}/devices/{did}", headers=HEADERS, timeout=60)
+        if dr.status_code not in (200, 204):
+            return fail(f"Device delete failed: {dr.text}", dr.status_code, {"workflow_id": wid, "action": action})
+        # Remove site if empty
+        site_deleted, site_msg = False, None
+        if site_id:
+            still = [d for d in get_devices() if str(d.get("identification", {}).get("site", {}).get("id") or "") == site_id]
+            if not still:
+                sr = requests.delete(f"{UISP_BASE}/sites/{site_id}", headers=HEADERS, timeout=45)
+                site_deleted = sr.status_code in (200, 204)
+                site_msg = "Empty site also removed" if site_deleted else f"Site delete failed: {sr.status_code}"
+            else:
+                site_msg = f"Site not empty ({len(still)} device(s) remain)"
+        log_req("/cancel-cpe", wid, mac, ip, "success", f"{action} method={method}")
         return ok({
-            "message": "CPE was online — reboot command sent",
-            "action": "reboot_issued",
-            "workflow_id": wid, "device_id": did, "mac": mac,
-            "name": dev.get("identification", {}).get("name"),
-            "status": status, "match_method": method
+            "message": f"Cancel complete — {action.replace('_', ' ')}, device removed",
+            "action": action,
+            "workflow_id": wid,
+            "device_id": did,
+            "mac": mac,
+            "name": ident.get("name"),
+            "status": status,
+            "match_method": method,
+            "site_id": site_id,
+            "site_deleted": site_deleted,
+            "site_message": site_msg
         })
     except HTTPException as e:
         log_req("/cancel-cpe", wid, mac, ip, "failed", str(e.detail))
