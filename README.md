@@ -95,3 +95,8 @@ https://vision-test-yz19.onrender.com/device-status?mac=70:A7:41:44:AC:10&ip=172
 
 Build: pip install -r requirements.txt
 Start: uvicorn vision_logger:app --host 0.0.0.0 --port $PORT
+
+
+## Currently In Production At
+
+Vision Cancelation Workflow
