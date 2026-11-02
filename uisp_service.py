@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, ipaddress, logging
+import os, re, ipaddress, logging, time
 from typing import Any, List
 import requests
 from fastapi import FastAPI, Request, HTTPException, Header
@@ -16,6 +16,7 @@ if not UISP_TOKEN or not WEBHOOK_SECRET:
     raise RuntimeError("UISP_TOKEN and WEBHOOK_SECRET required")
 
 HEADERS = {"x-auth-token": UISP_TOKEN, "Accept": "application/json"}
+SITE_DELETE_DELAY = 30  # seconds to wait after device delete before checking if site is empty
 
 def norm_mac(v: Any) -> str:
     return re.sub(r"[^0-9a-fA-F]", "", str(v or "")).upper()
@@ -126,11 +127,12 @@ async def remove_cpe(request: Request, x_webhook_secret: str | None = Header(Non
             return fail(f"UISP DELETE failed: {dr.text}", dr.status_code, {"workflow_id": wid})
         site_deleted, site_msg = False, None
         if delete_site and site_id:
+            time.sleep(SITE_DELETE_DELAY)
             still = [d for d in get_devices() if str(d.get("identification", {}).get("site", {}).get("id") or "") == site_id]
             if not still:
                 sr = requests.delete(f"{UISP_BASE}/sites/{site_id}", headers=HEADERS, timeout=45)
                 site_deleted = sr.status_code in (200, 204)
-                site_msg = "Empty site also removed" if site_deleted else f"Site delete failed: {sr.status_code}"
+                site_msg = "Empty site also removed" if site_deleted else f"Site delete failed: {sr.status_code} {sr.text}"
             else:
                 site_msg = f"Site not empty ({len(still)} device(s) remain)"
         log_req("/remove-cpe", wid, mac, ip, "success", f"device_id={did}")
@@ -206,11 +208,12 @@ async def cancel_cpe(request: Request, x_webhook_secret: str | None = Header(Non
             return fail(f"Device delete failed: {dr.text}", dr.status_code, {"workflow_id": wid, "action": action})
         site_deleted, site_msg = False, None
         if site_id:
+            time.sleep(SITE_DELETE_DELAY)
             still = [d for d in get_devices() if str(d.get("identification", {}).get("site", {}).get("id") or "") == site_id]
             if not still:
                 sr = requests.delete(f"{UISP_BASE}/sites/{site_id}", headers=HEADERS, timeout=45)
                 site_deleted = sr.status_code in (200, 204)
-                site_msg = "Empty site also removed" if site_deleted else f"Site delete failed: {sr.status_code}"
+                site_msg = "Empty site also removed" if site_deleted else f"Site delete failed: {sr.status_code} {sr.text}"
             else:
                 site_msg = f"Site not empty ({len(still)} device(s) remain)"
         log_req("/cancel-cpe", wid, mac, ip, "success", f"{action} method={method}")
@@ -331,3 +334,4 @@ async def signal_history(request: Request, x_webhook_secret: str | None = Header
 @app.get("/health")
 def health():
     return {"result": "success", "status": "ok"}
+
