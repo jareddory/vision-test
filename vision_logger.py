@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-import os, re, ipaddress, logging
-from typing import Any, List, Optional
+import os, re, ipaddress, logging, time
+from typing import Any, List
 import requests
 from fastapi import FastAPI, Request, HTTPException, Header
 from fastapi.responses import JSONResponse
@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("uisp")
 
-app = FastAPI()
+app = FastAPI(title="UISP Service")
 UISP_BASE = os.getenv("UISP_BASE_URL", "https://btwi.uisp.com/nms/api/v2.1").rstrip("/")
 UISP_TOKEN = os.getenv("UISP_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
@@ -16,6 +16,7 @@ if not UISP_TOKEN or not WEBHOOK_SECRET:
     raise RuntimeError("UISP_TOKEN and WEBHOOK_SECRET required")
 
 HEADERS = {"x-auth-token": UISP_TOKEN, "Accept": "application/json"}
+SITE_DELETE_DELAY = 30  # seconds to wait after device delete before checking if site is empty
 
 def norm_mac(v: Any) -> str:
     return re.sub(r"[^0-9a-fA-F]", "", str(v or "")).upper()
@@ -70,17 +71,14 @@ def find_device_cancel(mac: str, ip: str, name: str) -> tuple:
     device = mac_matches[0]
     if is_infra(device):
         raise HTTPException(403, "Potential infrastructure device — refused")
-    # Try IP match first
     if ip and ip in device_ips(device):
         return device, "mac+ip"
-    # Fallback: name match (handles sohncindy vs Cindy Sohn, spaces, reversed)
     if name:
         dev_name = re.sub(r"[^a-z0-9]", "", str(device.get("identification", {}).get("name") or "").lower())
         input_clean = re.sub(r"[^a-z0-9]", "", name.lower())
         if dev_name and input_clean:
             if input_clean in dev_name or dev_name in input_clean:
                 return device, "mac+name"
-            # Check for any shared 4+ character chunk (covers reversed names)
             for size in range(min(len(input_clean), 8), 3, -1):
                 for i in range(len(input_clean) - size + 1):
                     if input_clean[i:i+size] in dev_name:
@@ -129,11 +127,12 @@ async def remove_cpe(request: Request, x_webhook_secret: str | None = Header(Non
             return fail(f"UISP DELETE failed: {dr.text}", dr.status_code, {"workflow_id": wid})
         site_deleted, site_msg = False, None
         if delete_site and site_id:
+            time.sleep(SITE_DELETE_DELAY)
             still = [d for d in get_devices() if str(d.get("identification", {}).get("site", {}).get("id") or "") == site_id]
             if not still:
                 sr = requests.delete(f"{UISP_BASE}/sites/{site_id}", headers=HEADERS, timeout=45)
                 site_deleted = sr.status_code in (200, 204)
-                site_msg = "Empty site also removed" if site_deleted else f"Site delete failed: {sr.status_code}"
+                site_msg = "Empty site also removed" if site_deleted else f"Site delete failed: {sr.status_code} {sr.text}"
             else:
                 site_msg = f"Site not empty ({len(still)} device(s) remain)"
         log_req("/remove-cpe", wid, mac, ip, "success", f"device_id={did}")
@@ -204,18 +203,17 @@ async def cancel_cpe(request: Request, x_webhook_secret: str | None = Header(Non
             if rr.status_code not in (200, 202, 204):
                 return fail(f"Reboot command failed: {rr.text}", rr.status_code, {"workflow_id": wid})
             action = "reboot_issued"
-        # Remove the device
         dr = requests.delete(f"{UISP_BASE}/devices/{did}", headers=HEADERS, timeout=60)
         if dr.status_code not in (200, 204):
             return fail(f"Device delete failed: {dr.text}", dr.status_code, {"workflow_id": wid, "action": action})
-        # Remove site if empty
         site_deleted, site_msg = False, None
         if site_id:
+            time.sleep(SITE_DELETE_DELAY)
             still = [d for d in get_devices() if str(d.get("identification", {}).get("site", {}).get("id") or "") == site_id]
             if not still:
                 sr = requests.delete(f"{UISP_BASE}/sites/{site_id}", headers=HEADERS, timeout=45)
                 site_deleted = sr.status_code in (200, 204)
-                site_msg = "Empty site also removed" if site_deleted else f"Site delete failed: {sr.status_code}"
+                site_msg = "Empty site also removed" if site_deleted else f"Site delete failed: {sr.status_code} {sr.text}"
             else:
                 site_msg = f"Site not empty ({len(still)} device(s) remain)"
         log_req("/cancel-cpe", wid, mac, ip, "success", f"{action} method={method}")
