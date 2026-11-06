@@ -182,6 +182,12 @@ async def reboot_cpe(request: Request, x_webhook_secret: str | None = Header(Non
 
 @app.api_route("/cancel-cpe", methods=["GET", "POST"])
 async def cancel_cpe(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
+    """Delete the matched CPE only. Do not check reachability and do not reboot.
+
+    Vision reboots the CPE and handles a manual kick if that reboot fails, then calls
+    this endpoint. Identity stays in find_device_cancel. An empty site is still removed
+    after the device delete.
+    """
     check_secret(request, x_webhook_secret)
     data = dict(request.query_params) if request.method == "GET" else await request.json()
     wid = data.get("workflow_id") or ""
@@ -195,17 +201,10 @@ async def cancel_cpe(request: Request, x_webhook_secret: str | None = Header(Non
         ident = dev.get("identification", {})
         did = str(ident.get("id") or "")
         site_id = str(ident.get("site", {}).get("id") or "") if ident.get("site") else None
-        status = str(dev.get("overview", {}).get("status") or dev.get("status") or "").lower()
-        offline = status in ("disconnected", "offline", "inactive", "unreachable", "down", "")
-        action = "already_offline"
-        if not offline:
-            rr = requests.post(f"{UISP_BASE}/devices/{did}/reboot", headers=HEADERS, timeout=45)
-            if rr.status_code not in (200, 202, 204):
-                return fail(f"Reboot command failed: {rr.text}", rr.status_code, {"workflow_id": wid})
-            action = "reboot_issued"
+        action = "device_deleted"
         dr = requests.delete(f"{UISP_BASE}/devices/{did}", headers=HEADERS, timeout=60)
         if dr.status_code not in (200, 204):
-            return fail(f"Device delete failed: {dr.text}", dr.status_code, {"workflow_id": wid, "action": action})
+            return fail(f"Device delete failed: {dr.text}", dr.status_code, {"workflow_id": wid})
         site_deleted, site_msg = False, None
         if site_id:
             time.sleep(SITE_DELETE_DELAY)
@@ -218,13 +217,12 @@ async def cancel_cpe(request: Request, x_webhook_secret: str | None = Header(Non
                 site_msg = f"Site not empty ({len(still)} device(s) remain)"
         log_req("/cancel-cpe", wid, mac, ip, "success", f"{action} method={method}")
         return ok({
-            "message": f"Cancel complete — {action.replace('_', ' ')}, device removed",
+            "message": "Cancel complete — device removed",
             "action": action,
             "workflow_id": wid,
             "device_id": did,
             "mac": mac,
             "name": ident.get("name"),
-            "status": status,
             "match_method": method,
             "site_id": site_id,
             "site_deleted": site_deleted,

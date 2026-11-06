@@ -39,7 +39,7 @@ When result equals failed, create the manual task.
 
 - /remove-cpe (GET/POST) — Delete a CPE. Optionally delete empty site. Params: mac, ip, delete_site=true
 - /reboot-cpe (GET/POST) — Reboot a CPE (refuses if unreachable). Params: mac, ip
-- /cancel-cpe (GET/POST) — For cancellations. Offline = done. Online = reboot. Then removes CPE and empty site. Name fallback if IP fails. Params: mac, name (recommended), ip (optional)
+- /cancel-cpe (GET/POST) — For cancellations. Deletes the matched CPE and, if the site is then empty, the site. Does not check whether the CPE is offline and does not reboot (Vision owns reboot and manual kick-on-fail first). Name fallback if IP fails. Params: mac, name (recommended), ip (optional)
 - /outage-check (GET/POST) — Check if device is offline or in an outage. Params: mac, ip
 - /device-status (GET/POST) — Detailed status. Params: mac, ip
 - /signal-history (GET/POST) — Signal statistics. Params: mac, ip, interval
@@ -69,14 +69,15 @@ https://vision-test-yz19.onrender.com/device-status?mac=70:A7:41:44:AC:10&ip=172
 
 ## /cancel-cpe details
 
+Delete-only. This endpoint does not check reachability and does not reboot the CPE. Vision reboots first and opens a manual task if that reboot fails, then calls cancel to remove the device.
+
 1. Requires MAC.
 2. Tries MAC + IP match first (if IP provided).
-3. If IP missing or does not match, falls back to partial name match (handles reversed names like sohncindy vs Cindy Sohn, missing spaces, etc.).
-4. If device is offline, skips reboot.
-5. If device is online, sends reboot.
-6. Deletes the CPE from UISP.
-7. Deletes the site if it is now empty.
-8. Returns result: success or result: failed.
+3. If IP missing or does not match, falls back to partial name match (handles reversed names like sohncindy vs Cindy Sohn, missing spaces, etc.). The name fallback is unchanged.
+4. If the MAC is not unique, or neither IP nor name matches, fails closed (409). Infrastructure devices are refused (403).
+5. Deletes the CPE from UISP.
+6. Deletes the site if it is now empty.
+7. Returns result: success or result: failed, with success, message, and workflow_id. Success sets action to device_deleted.
 
 ## Safety checks
 
