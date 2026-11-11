@@ -138,6 +138,7 @@ class RenameCpeTests(unittest.TestCase):
         self.assertEqual(body["result"], "success")
         self.assertEqual(body["old_name"], "Old Name")
         self.assertEqual(body["new_name"], "Cindy Sohn")
+        self.assertEqual(body["new_hostname"], "Cindy-Sohn")
         self.assertEqual(body["device_id"], "dev-1")
         self.assertEqual(body["match_method"], "mac+ip")
         self.assertEqual(body["changed"], {"uisp": True, "radio": True})
@@ -155,7 +156,7 @@ class RenameCpeTests(unittest.TestCase):
         self.assertEqual(puts[1][2], {"isComposeRequest": "false"})
         airos_body = puts[1][3]
         self.assertEqual(list(airos_body), ["system"])  # never resend wireless/network
-        self.assertEqual(airos_body["system"]["hostname"], "Cindy Sohn")
+        self.assertEqual(airos_body["system"]["hostname"], "Cindy-Sohn")
         self.assertEqual(airos_body["system"]["timezone"], "America/Chicago")
 
     def test_location_present_is_appended(self):
@@ -163,7 +164,9 @@ class RenameCpeTests(unittest.TestCase):
         resp, body = self.invoke(FakeRequest(method="POST", body=self.params(location="Shop")), u)
         self.assertEqual(resp.status_code, 200, body)
         self.assertEqual(body["new_name"], "Cindy Sohn - Shop")
+        self.assertEqual(body["new_hostname"], "Cindy-Sohn-Shop")
         self.assertEqual(u.puts()[0][3]["meta"]["alias"], "Cindy Sohn - Shop")
+        self.assertEqual(u.puts()[1][3]["system"]["hostname"], "Cindy-Sohn-Shop")
 
     def test_blank_location_is_absent(self):
         for loc in ("", "   ", None):
@@ -206,13 +209,18 @@ class RenameCpeTests(unittest.TestCase):
         self.assertEqual(body["changed"], {"uisp": False, "radio": False})
         self.assertEqual(body["radio_status"], "would_push")
         self.assertEqual(body["new_name"], "Cindy Sohn - Shop")
+        self.assertEqual(body["new_hostname"], "Cindy-Sohn-Shop")
         self.assertEqual(u.puts(), [])
 
     def test_already_named_no_change(self):
-        u = Uisp([cpe(name="Cindy Sohn")], alias="Cindy Sohn", hostname="Cindy Sohn")
+        # Radio is already named only when its hostname equals the sanitized value.
+        u = Uisp([cpe(name="Cindy Sohn")], alias="Cindy Sohn", hostname="Cindy-Sohn")
         resp, body = self.invoke(FakeRequest(params=self.params()), u)
         self.assertEqual(resp.status_code, 200, body)
         self.assertEqual(body["message"], "Already named — no change")
+        self.assertEqual(body["new_name"], "Cindy Sohn")
+        self.assertEqual(body["new_hostname"], "Cindy-Sohn")
+        self.assertEqual(body["radio_status"], "already_named")
         self.assertEqual(body["changed"], {"uisp": False, "radio": False})
         self.assertEqual(u.puts(), [])
 
@@ -226,7 +234,9 @@ class RenameCpeTests(unittest.TestCase):
         u = Uisp([cpe(name="Cindy Sohn")], alias="Cindy Sohn", hostname="ubnt-old")
         resp, body = self.invoke(FakeRequest(params=self.params()), u)
         self.assertEqual(body["changed"], {"uisp": False, "radio": True})
+        self.assertEqual(body["new_hostname"], "Cindy-Sohn")
         self.assertEqual([p[1] for p in u.puts()], ["/devices/airos/dev-1/configuration"])
+        self.assertEqual(u.puts()[0][3]["system"]["hostname"], "Cindy-Sohn")
 
     # --- matching -------------------------------------------------------
     def test_match_failures_write_nothing(self):
@@ -309,6 +319,191 @@ class RenameCpeTests(unittest.TestCase):
         resp, body = self.invoke(FakeRequest(params=self.params()), u)
         self.assertEqual(resp.status_code, 500)
         self.assertIn("connection reset", body["message"])
+
+    # --- 422: alias saved, UISP hostname sync failed -------------------
+    def _put_422(self, u, saved_alias=None):
+        def put_unms():
+            if saved_alias is not None:
+                u.unms["meta"]["alias"] = saved_alias
+            return Resp(422, {
+                "statusCode": 422,
+                "error": "Unprocessable Entity",
+                "message": "Failed to update wireless device hostname by alias.",
+            })
+        u.put_unms = put_unms
+
+    def test_422_alias_saved_continues_to_hostname_push(self):
+        u = Uisp([cpe()], alias="Old Name", hostname="robertsmichael")
+        self._put_422(u, saved_alias="Mike Roberts")
+        resp, body = self.invoke(FakeRequest(params=self.params(name="Mike Roberts")), u)
+        self.assertEqual(resp.status_code, 200, body)
+        self.assertEqual(body["result"], "success")
+        self.assertEqual(body["changed"], {"uisp": True, "radio": True})
+        self.assertEqual(body["radio_status"], "pushed")
+        self.assertEqual(body["uisp_warning"], "Failed to update wireless device hostname by alias.")
+        self.assertEqual(body["new_name"], "Mike Roberts")
+        self.assertEqual(body["new_hostname"], "Mike-Roberts")
+        self.assertEqual(body["old_hostname"], "robertsmichael")
+        puts = u.puts()
+        self.assertEqual([p[1] for p in puts], [
+            "/devices/dev-1/system/unms",
+            "/devices/airos/dev-1/configuration",
+        ])
+        self.assertEqual(puts[0][3]["meta"]["alias"], "Mike Roberts")
+        self.assertEqual(puts[1][3]["system"]["hostname"], "Mike-Roberts")
+        self.assertEqual(puts[1][3]["system"]["timezone"], "America/Chicago")
+        unms_gets = [c for c in u.calls if c[0] == "GET" and c[1].endswith("/system/unms")]
+        self.assertEqual(len(unms_gets), 2)
+
+    def test_422_alias_not_saved_fails_before_radio(self):
+        u = Uisp([cpe()], alias="Old Name", hostname="robertsmichael")
+        self._put_422(u, saved_alias=None)
+        resp, body = self.invoke(FakeRequest(params=self.params(name="Mike Roberts")), u)
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(body["result"], "failed")
+        self.assertIs(body["success"], False)
+        self.assertIn("UISP rename failed", body["message"])
+        self.assertIn("Failed to update wireless device hostname by alias.", body["message"])
+        self.assertEqual(body["changed"], {"uisp": False, "radio": False})
+        self.assertEqual(body["new_name"], "Mike Roberts")
+        self.assertEqual(body["new_hostname"], "Mike-Roberts")
+        self.assertNotIn("uisp_warning", body)
+        self.assertEqual([p[1] for p in u.puts()], ["/devices/dev-1/system/unms"])
+        unms_gets = [c for c in u.calls if c[0] == "GET" and c[1].endswith("/system/unms")]
+        self.assertEqual(len(unms_gets), 2)
+
+    def test_422_alias_saved_then_radio_failure_keeps_warning(self):
+        u = Uisp([cpe()], hostname="robertsmichael",
+                 put_airos=lambda: Resp(500, text="Failed to save settings"))
+        self._put_422(u, saved_alias="Mike Roberts")
+        resp, body = self.invoke(FakeRequest(params=self.params(name="Mike Roberts")), u)
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(body["result"], "failed")
+        self.assertIn("Radio hostname push failed", body["message"])
+        self.assertEqual(body["changed"], {"uisp": True, "radio": False})
+        self.assertEqual(body["uisp_warning"], "Failed to update wireless device hostname by alias.")
+        self.assertEqual(body["new_hostname"], "Mike-Roberts")
+
+    # --- hostname sanitization -----------------------------------------
+    def test_sanitize_hostname_cases(self):
+        self.assertEqual(mod.AIROS_HOSTNAME_MAX, 32)
+        cases = (
+            ("Mike Roberts", "Mike-Roberts"),
+            ("Cindy  Sohn", "Cindy-Sohn"),
+            ("John Doe - Shop", "John-Doe-Shop"),
+            ("sohn, CINDY", "sohn-CINDY"),
+            ("Mike's Radio!", "Mikes-Radio"),
+            ("a@b#c", "abc"),
+            ("---Hello---", "Hello"),
+            ("a--b", "a-b"),
+            ("node_1.local", "node_1.local"),
+            ("!!!", ""),
+            ("@@@", ""),
+            (" - ", ""),
+            ("A" * 40, "A" * 32),
+            ("A" * 31 + " B", "A" * 31),  # cap lands on "-" and the trailing hyphen is trimmed
+        )
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                self.assertEqual(mod.sanitize_hostname(raw), expected)
+
+    def test_sanitize_hostname_space_char_is_configurable(self):
+        with patch.object(mod, "RENAME_HOSTNAME_SPACE_CHAR", "_"):
+            self.assertEqual(mod.sanitize_hostname("Mike Roberts"), "Mike_Roberts")
+            u = Uisp([cpe()])
+            resp, body = self.invoke(FakeRequest(params=self.params(name="Mike Roberts")), u)
+        self.assertEqual(resp.status_code, 200, body)
+        self.assertEqual(body["new_name"], "Mike Roberts")
+        self.assertEqual(body["new_hostname"], "Mike_Roberts")
+        self.assertEqual(u.puts()[0][3]["meta"]["alias"], "Mike Roberts")
+        self.assertEqual(u.puts()[1][3]["system"]["hostname"], "Mike_Roberts")
+
+    def test_punctuation_stays_in_alias_and_leaves_the_hostname(self):
+        u = Uisp([cpe()])
+        resp, body = self.invoke(FakeRequest(params=self.params(name="O'Brien, Mike", location="Shop")), u)
+        self.assertEqual(resp.status_code, 200, body)
+        self.assertEqual(body["new_name"], "O'Brien, Mike - Shop")
+        self.assertEqual(body["new_hostname"], "OBrien-Mike-Shop")
+        self.assertEqual(u.puts()[0][3]["meta"]["alias"], "O'Brien, Mike - Shop")
+        self.assertEqual(u.puts()[1][3]["system"]["hostname"], "OBrien-Mike-Shop")
+
+    def test_long_hostname_is_capped_on_the_radio_only(self):
+        with patch.object(mod, "AIROS_HOSTNAME_MAX", 2):
+            u = Uisp([cpe()])
+            resp, body = self.invoke(FakeRequest(params=self.params(name="A B")), u)
+        self.assertEqual(resp.status_code, 200, body)
+        self.assertEqual(body["new_name"], "A B")
+        self.assertEqual(body["new_hostname"], "A")
+        self.assertEqual(u.puts()[0][3]["meta"]["alias"], "A B")
+        self.assertEqual(u.puts()[1][3]["system"]["hostname"], "A")
+
+    def test_empty_hostname_skips_radio_push(self):
+        for name in ("***", "!!!", "---"):
+            with self.subTest(name=name):
+                u = Uisp([cpe()])
+                resp, body = self.invoke(FakeRequest(params=self.params(name=name)), u)
+                self.assertEqual(resp.status_code, 200, body)
+                self.assertEqual(body["new_name"], name)
+                self.assertEqual(body["new_hostname"], "")
+                self.assertEqual(body["radio_status"], "skipped_empty_hostname")
+                self.assertEqual(body["changed"], {"uisp": True, "radio": False})
+                self.assertEqual([p[1] for p in u.puts()], ["/devices/dev-1/system/unms"])
+                self.assertEqual(u.puts()[0][3]["meta"]["alias"], name)
+                self.assertFalse(any("/airos/" in c[1] for c in u.calls))
+
+    def test_empty_hostname_dry_run_does_not_write(self):
+        u = Uisp([cpe()])
+        resp, body = self.invoke(FakeRequest(params=self.params(name="***", dry_run="true")), u)
+        self.assertEqual(resp.status_code, 200, body)
+        self.assertEqual(body["new_name"], "***")
+        self.assertEqual(body["new_hostname"], "")
+        self.assertEqual(body["radio_status"], "skipped_empty_hostname")
+        self.assertEqual(body["would_change"], {"uisp": True, "radio": False})
+        self.assertEqual(body["changed"], {"uisp": False, "radio": False})
+        self.assertEqual(u.puts(), [])
+
+    # --- alias already set, hostname still old -------------------------
+    def test_alias_already_set_but_hostname_differs_pushes_radio(self):
+        """Live leftover: alias "Mike Roberts", radio hostname still "robertsmichael"."""
+        u = Uisp([cpe(name="Mike Roberts")], alias="Mike Roberts", hostname="robertsmichael")
+        resp, body = self.invoke(FakeRequest(params=self.params(name="Mike Roberts")), u)
+        self.assertEqual(resp.status_code, 200, body)
+        self.assertEqual(body["changed"], {"uisp": False, "radio": True})
+        self.assertEqual(body["radio_status"], "pushed")
+        self.assertEqual(body["new_name"], "Mike Roberts")
+        self.assertEqual(body["new_hostname"], "Mike-Roberts")
+        self.assertNotIn("uisp_warning", body)
+        puts = u.puts()
+        self.assertEqual([p[1] for p in puts], ["/devices/airos/dev-1/configuration"])
+        self.assertEqual(puts[0][3]["system"]["hostname"], "Mike-Roberts")
+
+        dry = Uisp([cpe(name="Mike Roberts")], alias="Mike Roberts", hostname="robertsmichael")
+        resp, body = self.invoke(FakeRequest(params=self.params(name="Mike Roberts", dry_run="true")), dry)
+        self.assertEqual(resp.status_code, 200, body)
+        self.assertEqual(body["message"], "Dry run — no changes made")
+        self.assertEqual(body["would_change"], {"uisp": False, "radio": True})
+        self.assertEqual(body["new_name"], "Mike Roberts")
+        self.assertEqual(body["new_hostname"], "Mike-Roberts")
+        self.assertEqual(body["radio_status"], "would_push")
+        self.assertEqual(dry.puts(), [])
+
+    def test_alias_and_sanitized_hostname_already_match(self):
+        u = Uisp([cpe(name="Mike Roberts")], alias="Mike Roberts", hostname="Mike-Roberts")
+        resp, body = self.invoke(FakeRequest(params=self.params(name="Mike Roberts")), u)
+        self.assertEqual(resp.status_code, 200, body)
+        self.assertEqual(body["message"], "Already named — no change")
+        self.assertEqual(body["new_name"], "Mike Roberts")
+        self.assertEqual(body["new_hostname"], "Mike-Roberts")
+        self.assertEqual(body["radio_status"], "already_named")
+        self.assertEqual(u.puts(), [])
+
+    def test_spaced_radio_hostname_is_not_already_named(self):
+        u = Uisp([cpe(name="Mike Roberts")], alias="Mike Roberts", hostname="Mike Roberts")
+        resp, body = self.invoke(FakeRequest(params=self.params(name="Mike Roberts")), u)
+        self.assertEqual(resp.status_code, 200, body)
+        self.assertEqual(body["changed"], {"uisp": False, "radio": True})
+        self.assertEqual(body["new_hostname"], "Mike-Roberts")
+        self.assertEqual(u.puts()[0][3]["system"]["hostname"], "Mike-Roberts")
 
 
 if __name__ == "__main__":

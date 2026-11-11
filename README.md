@@ -40,7 +40,7 @@ When result equals failed, create the manual task.
 - /remove-cpe (GET/POST) — Delete a CPE. Optionally delete empty site. Params: mac, ip, delete_site=true
 - /reboot-cpe (GET/POST) — Reboot a CPE (refuses if unreachable). Params: mac, ip
 - /cancel-cpe (GET/POST) — For cancellations. Deletes the matched CPE and, if the site is then empty, the site. Does not check whether the CPE is offline and does not reboot (Vision owns reboot and manual kick-on-fail first). Name fallback if IP fails. Params: mac, name (recommended), ip (optional)
-- /rename-cpe (GET/POST) — Rename a CPE in UISP and push the hostname to the radio (airMAX/airOS only for now). Strict MAC + IP match. Params: mac, ip, name, location (optional; blank = none), dry_run (optional), push_hostname (optional, default true)
+- /rename-cpe (GET/POST) — Rename a CPE in UISP and push a sanitized hostname to the radio (airMAX/airOS only for now). Strict MAC + IP match. Params: mac, ip, name, location (optional; blank = none), dry_run (optional), push_hostname (optional, default true)
 - /outage-check (GET/POST) — Check if device is offline or in an outage. Params: mac, ip
 - /device-status (GET/POST) — Detailed status. Params: mac, ip
 - /signal-history (GET/POST) — Signal statistics. Params: mac, ip, interval
@@ -82,20 +82,22 @@ Delete-only. This endpoint does not check reachability and does not reboot the C
 
 ## /rename-cpe details
 
-Draft endpoint. Renames the matched CPE.
+Draft endpoint. Renames the matched CPE in UISP and, for airOS radios, pushes a sanitized hostname.
 
 1. Requires mac, ip and name. Strict MAC + management IP match (same as /remove-cpe). Infrastructure devices are refused (403). No name fallback.
-2. New name = name exactly as Vision sends it (only leading/trailing spaces trimmed; case and inner spaces kept). If location is non-blank, the new name is name + RENAME_LOCATION_SEPARATOR + location (default " - ", e.g. "John Doe - Shop"). A blank or whitespace-only location is treated as absent, so Vision can always send the field.
-3. UISP rename: sets the device alias (the name shown in UISP) with PUT /devices/{id}/system/unms, keeping the device's other UISP settings (note, maintenance, ping settings). UISP limits the alias to 30 characters; longer names fail with 400 before anything is changed.
-4. Radio hostname: for airMAX devices, reads GET /devices/airos/{id}/configuration and sends back only the system section with hostname changed via PUT /devices/airos/{id}/configuration?isComposeRequest=false. Other device types (airFiber, Wave, LTU, airCube, ONU, …) get radio_status unsupported_device_type and are renamed in UISP only. Pass push_hostname=false to skip the radio push for one call.
-5. If both the UISP alias and the radio hostname already equal the new name, returns success with message "Already named — no change".
-6. dry_run=true does the lookups and returns would_change without writing anything.
+2. New name = name exactly as Vision sends it (only leading/trailing spaces trimmed; case and inner spaces kept). If location is non-blank, the new name is name + RENAME_LOCATION_SEPARATOR + location (default " - ", e.g. "John Doe - Shop"). A blank or whitespace-only location is treated as absent, so Vision can always send the field. This exact string is the UISP alias (`new_name`). It is not sanitized.
+3. UISP rename: sets the device alias with PUT /devices/{id}/system/unms, keeping the device's other UISP settings (note, maintenance, ping settings). UISP limits the alias to 30 characters; longer names fail with 400 before anything is changed.
+4. If that PUT returns an error, including HTTP 422 `{"message":"Failed to update wireless device hostname by alias."}`, the service re-reads GET /devices/{id}/system/unms. UISP saves `meta.alias` and then tries to copy the alias onto the radio hostname itself; on airOS (seen on a PBE-5AC-Gen2 running 8.7.25) that copy fails with 422 even though the alias was stored. When the re-read shows `meta.alias` equal to the requested name, the UISP rename counts as successful (`changed.uisp` true), the response includes `uisp_warning` set to UISP's error message, and the service continues to its own hostname push. When the alias did not change, the call fails the same way as any other UISP rename error and the radio is not touched.
+5. Radio hostname (airOS only): the alias is sanitized for the radio and only the radio. Whitespace runs are replaced with RENAME_HOSTNAME_SPACE_CHAR (default `-`). Characters outside `[A-Za-z0-9-_.]` are removed, repeated `-` are collapsed, leading and trailing `-` are trimmed, and the result is capped at 32 characters. The airOS 8 user guide describes Device Name and does not document a maximum length; 32 is the limit this service enforces. The sanitized value is `new_hostname`. The service reads GET /devices/airos/{id}/configuration and sends back only the system section with `hostname` set to `new_hostname` via PUT /devices/airos/{id}/configuration?isComposeRequest=false. `already_named` and `would_push` compare the radio's current hostname to `new_hostname`, not to the alias. Other device types (airFiber, Wave, LTU, airCube, ONU, …) get radio_status `unsupported_device_type` and are renamed in UISP only. Pass push_hostname=false to skip the radio push for one call. If sanitizing leaves an empty hostname, the push is skipped with radio_status `skipped_empty_hostname`.
+6. A later call where the alias already matches and the radio hostname does not equal `new_hostname` still pushes the hostname. That repairs a device left with the alias saved and the old hostname (for example alias `Mike Roberts`, hostname `robertsmichael`, pushed hostname `Mike-Roberts`).
+7. If the alias already matches and the radio hostname already equals `new_hostname` (or the radio push does not apply), the call returns success with message "Already named — no change".
+8. dry_run=true does the lookups and returns `would_change`, `new_name`, and `new_hostname` without writing anything.
 
 Example:
 https://vision-test-yz19.onrender.com/rename-cpe?mac=70:A7:41:44:AC:10&ip=172.20.170.196&name=John%20Doe&location=Shop&dry_run=true&secret=YOUR_SECRET&workflow_id=WF-123
 
-Success response fields: old_name, new_name, old_hostname, device_id, device_type, match_method (mac+ip), changed {uisp, radio}, would_change (dry_run / no-change), radio_status (pushed, would_push, already_named, unsupported_device_type, skipped_disabled), dry_run.
-On failure after the UISP rename succeeded (e.g. radio push failed), result is failed and changed shows {"uisp": true, "radio": false} so Vision can open a manual task to set the hostname.
+Success response fields: old_name, new_name, new_hostname, old_hostname, device_id, device_type, match_method (mac+ip), changed {uisp, radio}, would_change (dry_run / no-change), uisp_warning (present when UISP returned an error after the alias had saved), radio_status (pushed, would_push, already_named, unsupported_device_type, skipped_disabled, skipped_empty_hostname), dry_run.
+On failure after the UISP rename succeeded (for example the radio push failed), result is failed and changed shows {"uisp": true, "radio": false} so Vision can open a manual task to set the hostname. That failure also includes uisp_warning when the alias PUT returned an error that was accepted because the alias had saved.
 
 ## Safety checks
 
@@ -112,6 +114,7 @@ On failure after the UISP rename succeeded (e.g. radio push failed), result is f
 - RENAME_LOCATION_SEPARATOR (optional) — Separator between name and location for /rename-cpe. Default " - " (placeholder until finalized)
 - RENAME_PUSH_HOSTNAME (optional) — true/false master switch for the /rename-cpe radio hostname push. Default true
 - RENAME_HOSTNAME_AIROS_TYPES (optional) — Comma list of UISP device types that get the airOS hostname push. Default airMax
+- RENAME_HOSTNAME_SPACE_CHAR (optional) — Replaces each whitespace run when building the /rename-cpe radio hostname. Default "-". Characters outside [A-Za-z0-9-_.] are still removed, so the value should be one of those. The UISP alias is not affected.
 
 ## Deployment
 
