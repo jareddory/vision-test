@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # UISP Service
-# Last updated: 2026-11-05
-# Changes: /cancel-cpe is delete-only. It does not check reachability and does not reboot.
+# Last updated: 2026-11-11
+# Changes: added /rename-cpe (UISP alias rename + optional radio hostname push; draft).
+#          /cancel-cpe is delete-only. It does not check reachability and does not reboot.
 #          Vision owns reboot and manual kick-on-fail before calling cancel.
 #          find_device_cancel identity rules and empty-site delete are unchanged.
 import os, re, ipaddress, logging, time
@@ -22,6 +23,23 @@ if not UISP_TOKEN or not WEBHOOK_SECRET:
 
 HEADERS = {"x-auth-token": UISP_TOKEN, "Accept": "application/json"}
 SITE_DELETE_DELAY = 15  # seconds to wait after device delete before checking if site is empty
+
+# /rename-cpe settings
+# Separator between customer name and optional location. Placeholder until Jared finalizes it.
+RENAME_LOCATION_SEPARATOR = os.getenv("RENAME_LOCATION_SEPARATOR", " - ")
+# UISP alias limit: PayloadUnmsSettings.meta.alias has maxLength 30 in the NMS v2.1 spec.
+UISP_ALIAS_MAX = 30
+# airOS system.hostname is pushed only for these UISP identification.type values (comma list).
+# airMax is the documented airOS family; add others (e.g. airFiber) only after testing on a real unit.
+RENAME_HOSTNAME_AIROS_TYPES = {
+    t.strip().lower() for t in os.getenv("RENAME_HOSTNAME_AIROS_TYPES", "airMax").split(",") if t.strip()
+}
+# Master switch for the radio push. Request param push_hostname can turn it off per call.
+RENAME_PUSH_HOSTNAME = os.getenv("RENAME_PUSH_HOSTNAME", "true").strip().lower() in ("1", "true", "yes")
+# Keys accepted by PUT /devices/{id}/system/unms (PayloadUnmsSettings).
+_UNMS_PAYLOAD_KEYS = ("overrideGlobal", "devicePingAddress", "devicePingIntervalNormal",
+                      "devicePingIntervalOutage", "deviceTransmissionFrequency", "deviceGracePeriodOutage")
+_UNMS_META_KEYS = ("alias", "note", "maintenance", "customIpAddress")
 
 def norm_mac(v: Any) -> str:
     return re.sub(r"[^0-9a-fA-F]", "", str(v or "")).upper()
@@ -343,6 +361,142 @@ async def signal_history(request: Request, x_webhook_secret: str | None = Header
     except Exception as e:
         log_req("/signal-history", wid, mac, ip, "failed", str(e))
         return fail(str(e), 500, {"workflow_id": wid})
+
+def truthy(v: Any) -> bool:
+    return str(v if v is not None else "").strip().lower() in ("1", "true", "yes", "on")
+
+def build_rename(name: Any, location: Any) -> str:
+    """Name exactly as Vision sent it (outer whitespace trimmed). A non-blank location is appended."""
+    base = str(name or "").strip()
+    loc = str(location or "").strip()
+    return f"{base}{RENAME_LOCATION_SEPARATOR}{loc}" if loc else base
+
+def _uisp_err(resp) -> str:
+    return f"{resp.status_code} {getattr(resp, 'text', '')}".strip()
+
+class UispCallError(Exception):
+    def __init__(self, message: str, status: int = 502):
+        super().__init__(message)
+        self.status = status
+
+def uisp_get_json(url: str) -> dict:
+    r = requests.get(url, headers=HEADERS, timeout=45)
+    if r.status_code != 200:
+        raise UispCallError(f"UISP GET {url.replace(UISP_BASE, '')} failed: {_uisp_err(r)}")
+    return r.json() or {}
+
+def unms_payload(current: dict, alias: str) -> dict:
+    """Body for PUT /devices/{id}/system/unms that keeps current settings and changes only meta.alias."""
+    body = {k: current[k] for k in _UNMS_PAYLOAD_KEYS if current.get(k) is not None}
+    body["overrideGlobal"] = bool(current.get("overrideGlobal", False))
+    meta_cur = current.get("meta") or {}
+    meta = {k: meta_cur[k] for k in _UNMS_META_KEYS if meta_cur.get(k) is not None}
+    meta["maintenance"] = bool(meta_cur.get("maintenance", False))
+    meta["alias"] = alias
+    body["meta"] = meta
+    return body
+
+@app.api_route("/rename-cpe", methods=["GET", "POST"])
+async def rename_cpe(request: Request, x_webhook_secret: str | None = Header(None, alias="X-Webhook-Secret")):
+    """Rename a CPE in UISP (device alias) and push the hostname to the radio where supported.
+
+    Strict MAC + management IP match; infrastructure devices refused. New name is the name Vision
+    sends (outer whitespace trimmed) plus RENAME_LOCATION_SEPARATOR + location when location is non-blank.
+    UISP:  PUT /devices/{id}/system/unms  (meta.alias)
+    Radio: PUT /devices/airos/{id}/configuration?isComposeRequest=false  (system.hostname), airOS types only.
+    dry_run=true reports what would change and writes nothing.
+    """
+    check_secret(request, x_webhook_secret)
+    data = dict(request.query_params) if request.method == "GET" else await request.json()
+    wid, mac, ip = data.get("workflow_id") or "", norm_mac(data.get("mac")), norm_ip(data.get("ip"))
+    dry_run = truthy(data.get("dry_run"))
+    push_hostname = RENAME_PUSH_HOSTNAME and (data.get("push_hostname") in (None, "") or truthy(data.get("push_hostname")))
+    new_name = build_rename(data.get("name"), data.get("location"))
+    if not re.fullmatch(r"[A-F0-9]{12}", mac):
+        return fail("Invalid or missing MAC", 400, {"workflow_id": wid})
+    if not ip:
+        return fail("Invalid or missing IP", 400, {"workflow_id": wid})
+    if not str(data.get("name") or "").strip():
+        return fail("Invalid or missing name", 400, {"workflow_id": wid})
+    if len(new_name) > UISP_ALIAS_MAX:
+        return fail(f"New name is {len(new_name)} characters; UISP alias limit is {UISP_ALIAS_MAX}", 400,
+                    {"workflow_id": wid, "new_name": new_name})
+    did = None
+    changed = {"uisp": False, "radio": False}
+    try:
+        dev = find_device_strict(mac, ip)
+        ident = safe_ident(dev)
+        did = str(ident.get("id") or "")
+        dev_type = str(ident.get("type") or "")
+        old_name = ident.get("displayName") or ident.get("name")
+        base = {"workflow_id": wid, "device_id": did, "mac": mac, "ip": ip, "match_method": "mac+ip",
+                "device_type": dev_type or None, "old_name": old_name, "new_name": new_name, "dry_run": dry_run}
+
+        # UISP side: current alias from device-specific UISP settings.
+        unms = uisp_get_json(f"{UISP_BASE}/devices/{did}/system/unms")
+        old_alias = (unms.get("meta") or {}).get("alias") or ""
+        # Already named if the alias matches, or there is no alias and the shown name already matches.
+        uisp_needed = not (old_alias == new_name or (not old_alias and old_name == new_name))
+
+        # Radio side: airOS hostname, only for configured types.
+        radio_supported = dev_type.lower() in RENAME_HOSTNAME_AIROS_TYPES
+        radio_status, old_hostname, airos_cfg = None, None, None
+        if not push_hostname:
+            radio_status = "skipped_disabled"
+        elif not radio_supported:
+            radio_status = "unsupported_device_type"
+        else:
+            airos_cfg = uisp_get_json(f"{UISP_BASE}/devices/airos/{did}/configuration")
+            old_hostname = (airos_cfg.get("system") or {}).get("hostname")
+            radio_status = "already_named" if old_hostname == new_name else "pending"
+        base["old_hostname"] = old_hostname
+        radio_needed = radio_status == "pending"
+
+        if not uisp_needed and not radio_needed:
+            log_req("/rename-cpe", wid, mac, ip, "success", f"device_id={did} no_change")
+            return ok({**base, "message": "Already named — no change", "changed": changed,
+                       "would_change": changed, "radio_status": radio_status})
+
+        if dry_run:
+            would = {"uisp": uisp_needed, "radio": radio_needed}
+            log_req("/rename-cpe", wid, mac, ip, "success", f"device_id={did} dry_run would={would}")
+            return ok({**base, "message": "Dry run — no changes made", "changed": changed,
+                       "would_change": would, "radio_status": "would_push" if radio_needed else radio_status})
+
+        if uisp_needed:
+            ur = requests.put(f"{UISP_BASE}/devices/{did}/system/unms", headers=HEADERS, timeout=45,
+                              json=unms_payload(unms, new_name))
+            if ur.status_code not in (200, 204):
+                raise UispCallError(f"UISP rename failed: {_uisp_err(ur)}", ur.status_code if ur.status_code >= 400 else 502)
+            changed["uisp"] = True
+
+        if radio_needed:
+            system = dict(airos_cfg.get("system") or {})
+            system["hostname"] = new_name
+            rr = requests.put(f"{UISP_BASE}/devices/airos/{did}/configuration", headers=HEADERS, timeout=60,
+                              params={"isComposeRequest": "false"}, json={"system": system})
+            if rr.status_code not in (200, 202, 204):
+                raise UispCallError(f"Radio hostname push failed: {_uisp_err(rr)}", rr.status_code if rr.status_code >= 400 else 502)
+            try:
+                st = rr.json() if rr.status_code == 200 else {}
+            except Exception:
+                st = {}
+            if isinstance(st, dict) and st.get("result") is False:
+                raise UispCallError(f"Radio hostname push failed: {st.get('message') or 'UISP returned result=false'}")
+            changed["radio"] = True
+            radio_status = "pushed"
+
+        log_req("/rename-cpe", wid, mac, ip, "success", f"device_id={did} changed={changed}")
+        return ok({**base, "message": "CPE renamed", "changed": changed, "radio_status": radio_status})
+    except HTTPException as e:
+        log_req("/rename-cpe", wid, mac, ip, "failed", str(e.detail))
+        return fail(str(e.detail), e.status_code, {"workflow_id": wid})
+    except UispCallError as e:
+        log_req("/rename-cpe", wid, mac, ip, "failed", str(e))
+        return fail(str(e), e.status, {"workflow_id": wid, "device_id": did, "new_name": new_name, "changed": changed})
+    except Exception as e:
+        log_req("/rename-cpe", wid, mac, ip, "failed", str(e))
+        return fail(str(e), 500, {"workflow_id": wid, "device_id": did, "new_name": new_name, "changed": changed})
 
 @app.get("/health")
 def health():
