@@ -758,12 +758,13 @@ def test_kick_starts_when_syslog_ip_is_blank(tmp_path, monkeypatch):
 
 
 class FakeUisp:
-    """Local stand-in for UISP NMS. Never points at a real controller."""
+    """Local NMS + CRM stand-in. Bound to 127.0.0.1 only."""
 
-    def __init__(self, devices, site, put_status=200):
+    def __init__(self, devices, site, client, patch_status=200):
         self.devices = devices
         self.site = site
-        self.put_status = put_status
+        self.client = client
+        self.patch_status = patch_status
         self.calls = []
         fake = self
 
@@ -787,14 +788,15 @@ class FakeUisp:
                 fake.calls.append({
                     "method": self.command,
                     "path": path,
-                    "token": self.headers.get("x-auth-token"),
+                    "nms_token": self.headers.get("x-auth-token"),
+                    "app_key": self.headers.get("X-Auth-App-Key"),
                     "body": body,
                 })
                 return path, body
 
             def do_GET(self):
                 path, _ = self._record()
-                if path.startswith("/devices"):
+                if path.startswith("/nms/devices"):
                     ident = path.rstrip("/").split("/")[-1]
                     if ident == "devices":
                         return self._send(200, fake.devices)
@@ -802,22 +804,31 @@ class FakeUisp:
                         if (dev.get("identification") or {}).get("id") == ident:
                             return self._send(200, dev)
                     return self._send(404, {"message": "not found"})
-                if path.startswith("/sites/"):
+                if path.startswith("/nms/sites/"):
                     site_id = path.rstrip("/").split("/")[-1]
-                    got = (fake.site.get("identification") or {}).get("id")
+                    got = str((fake.site.get("identification") or {}).get("id"))
                     if site_id == got:
                         return self._send(200, fake.site)
                     return self._send(404, {"message": "not found"})
+                if path.startswith("/crm/clients/"):
+                    cid = path.rstrip("/").split("/")[-1]
+                    if str(fake.client.get("id")) == cid:
+                        return self._send(200, fake.client)
+                    return self._send(404, {"message": "not found"})
                 return self._send(404, {"message": "not found"})
 
-            def do_PUT(self):
+            def do_PATCH(self):
                 path, body = self._record()
-                if path.startswith("/sites/") and fake.put_status == 200 and isinstance(body, dict):
-                    fake.site = body
-                self._send(fake.put_status, {"message": "put"})
+                if (path.startswith("/crm/clients/") and fake.patch_status == 200
+                        and isinstance(body, dict)):
+                    fake.client["firstName"] = body.get("firstName")
+                    fake.client["lastName"] = body.get("lastName")
+                self._send(fake.patch_status, {"message": "patch"})
 
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        port = self.httpd.server_address[1]
+        self.nms = f"http://127.0.0.1:{port}/nms"
+        self.crm = f"http://127.0.0.1:{port}/crm"
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
     def close(self):
@@ -825,7 +836,7 @@ class FakeUisp:
         self.httpd.server_close()
 
 
-def _station(site_type="endpoint", site_id="site-1", site_name="Old Customer"):
+def _station(site_type="endpoint", site_id="site-1", site_name="Robertrssa, Mikettt"):
     return {
         "identification": {
             "id": "dev-1",
@@ -836,142 +847,227 @@ def _station(site_type="endpoint", site_id="site-1", site_name="Old Customer"):
     }
 
 
-def _site(name="Old Customer", site_id="site-1", site_type="endpoint"):
-    return {
-        "identification": {
-            "id": site_id,
-            "name": name,
-            "type": site_type,
-            "parent": {"id": "tower-1"},
-        },
-        "description": {
-            "address": "123 Farm Road",
-            "location": {"latitude": 41.5, "longitude": -93.6},
-            "height": 4,
-        },
+def _site(name="Robertrssa, Mikettt", site_id="site-1", site_type="endpoint", client_id=3132):
+    site = {
+        "identification": {"id": site_id, "name": name, "type": site_type},
+        "description": {"address": "123 Farm Road", "ucrmId": str(client_id) if client_id else None},
     }
+    if client_id is not None:
+        site["ucrm"] = {"client": {"id": client_id, "name": name}}
+    return site
 
 
-def _arm_site_rename(monkeypatch, fake, write_token="write-token-test", api_token="", enabled=True):
+def _client(first="Mikettt", last="Robertrssa", client_id=3132, client_type=1):
+    return {"id": client_id, "clientType": client_type, "firstName": first, "lastName": last,
+            "companyName": None}
+
+
+def _arm_crm(monkeypatch, fake, app_key="crm-app-key-test", api_token="nms-read-token", enabled=True):
     import ssh_service
-    monkeypatch.setattr(ssh_service.S, "uisp_base_url", fake.base)
-    monkeypatch.setattr(ssh_service.S, "uisp_rename_site", enabled)
-    monkeypatch.setattr(ssh_service.S, "uisp_write_token", write_token)
+    monkeypatch.setattr(ssh_service.S, "uisp_base_url", fake.nms)
+    monkeypatch.setattr(ssh_service.S, "uisp_crm_base_url", fake.crm)
+    monkeypatch.setattr(ssh_service.S, "uisp_rename_crm_client", enabled)
+    monkeypatch.setattr(ssh_service.S, "uisp_crm_app_key", app_key)
     monkeypatch.setattr(ssh_service.S, "uisp_api_token", api_token)
 
 
-def test_uisp_site_rename_endpoint(ssh_env, monkeypatch):
-    fake = FakeUisp([_station()], _site())
+def _patches(fake):
+    return [c for c in fake.calls if c["method"] == "PATCH"]
+
+
+def test_crm_client_renamed(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(), _client())
     try:
         c, radio, log = ssh_env(BORKED_CFG)
-        _arm_site_rename(monkeypatch, fake, write_token="write-token-test", api_token="read-token-test")
+        _arm_crm(monkeypatch, fake)
         r = rename(c)
         j = r.json()
         assert j["result"] == "success" and j["saved"] and j["applied"], j
-        assert j["site_rename"]["state"] == "renamed"
-        assert j["site_rename"]["site_id"] == "site-1"
-        assert j["site_rename"]["before"] == "Old Customer"
-        assert j["site_rename"]["after"] == "Mike Roberts"
-        puts = [call for call in fake.calls if call["method"] == "PUT"]
-        assert len(puts) == 1
-        assert puts[0]["path"] == "/sites/site-1"
-        assert puts[0]["token"] == "write-token-test"
-        body = puts[0]["body"]
-        assert body["identification"]["name"] == "Mike Roberts"
-        assert body["identification"]["parent"] == {"id": "tower-1"}
-        assert body["description"]["address"] == "123 Farm Road"
-        assert body["description"]["location"] == {"latitude": 41.5, "longitude": -93.6}
-        assert not any(call["method"] == "PUT" and call["path"].startswith("/devices") for call in fake.calls)
-        assert all(call["token"] == "write-token-test" for call in fake.calls)
+        cr = j["crm_rename"]
+        assert cr["state"] == "renamed"
+        assert cr["client_id"] == 3132 and cr["site_id"] == "site-1"
+        assert cr["before"] == {"firstName": "Mikettt", "lastName": "Robertrssa"}
+        assert cr["after"] == {"firstName": "Mike", "lastName": "Roberts"}
+        patches = _patches(fake)
+        assert len(patches) == 1
+        assert patches[0]["path"] == "/crm/clients/3132"
+        assert patches[0]["body"] == {"firstName": "Mike", "lastName": "Roberts"}
+        assert patches[0]["app_key"] == "crm-app-key-test"
+        assert all(call["nms_token"] == "nms-read-token" for call in fake.calls if call["path"].startswith("/nms/"))
+        assert not any(call["method"] == "PUT" for call in fake.calls)
         raw = r.text + log.read_text()
-        assert "write-token-test" not in raw and "read-token-test" not in raw
+        assert "crm-app-key-test" not in raw and "nms-read-token" not in raw
         assert_standard(radio.cfg())
+        assert fake.client["firstName"] == "Mike" and fake.client["lastName"] == "Roberts"
     finally:
         fake.close()
 
 
-def test_uisp_site_rename_skips_tower(ssh_env, monkeypatch):
-    fake = FakeUisp([_station(site_type="site", site_id="tower-9", site_name="03_PRYHUT")],
-                    _site(name="03_PRYHUT", site_id="tower-9", site_type="site"))
+def test_crm_client_unchanged(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(name="Roberts, Mike"), _client(first="Mike", last="Roberts"))
     try:
         c, radio, _ = ssh_env(BORKED_CFG)
-        _arm_site_rename(monkeypatch, fake)
+        _arm_crm(monkeypatch, fake)
         j = rename(c).json()
         assert j["result"] == "success" and j["applied"], j
-        assert j["site_rename"]["state"] == "skipped"
-        assert j["site_rename"]["site_id"] == "tower-9"
-        assert any("endpoint" in w for w in j["warnings"])
-        assert not any(call["method"] == "PUT" for call in fake.calls)
-        assert not any(call["path"].startswith("/sites/") for call in fake.calls)
+        assert j["crm_rename"]["state"] == "unchanged"
+        assert j["crm_rename"]["before"] == {"firstName": "Mike", "lastName": "Roberts"}
+        assert j["crm_rename"]["after"] == {"firstName": "Mike", "lastName": "Roberts"}
+        assert _patches(fake) == []
         assert_standard(radio.cfg())
     finally:
         fake.close()
 
 
-def test_uisp_site_rename_dry_run_does_not_put(ssh_env, monkeypatch):
-    fake = FakeUisp([_station()], _site())
+def test_crm_multiword_last_name(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(), _client())
     try:
         c, radio, _ = ssh_env(BORKED_CFG)
-        _arm_site_rename(monkeypatch, fake)
+        _arm_crm(monkeypatch, fake)
+        j = rename(c, name="Mary Jo Smith").json()
+        assert j["result"] == "success", j
+        assert j["name"] == "Mary Jo Smith"
+        assert j["crm_rename"]["state"] == "renamed"
+        assert j["crm_rename"]["after"] == {"firstName": "Mary", "lastName": "Jo Smith"}
+        assert _patches(fake)[0]["body"] == {"firstName": "Mary", "lastName": "Jo Smith"}
+        assert "resolv.host.1.name=Mary Jo Smith" in radio.cfg()
+    finally:
+        fake.close()
+
+
+def test_crm_name_overrides(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(), _client())
+    try:
+        c, _, _ = ssh_env(BORKED_CFG)
+        _arm_crm(monkeypatch, fake)
+        j = rename(c, name="Ignored Person", crm_first_name="Ada", crm_last_name="Lovelace").json()
+        assert j["crm_rename"]["state"] == "renamed", j
+        assert j["crm_rename"]["after"] == {"firstName": "Ada", "lastName": "Lovelace"}
+        assert _patches(fake)[0]["body"] == {"firstName": "Ada", "lastName": "Lovelace"}
+        assert j["name"] == "Ignored Person"
+    finally:
+        fake.close()
+
+
+def test_crm_single_token_skips(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(), _client())
+    try:
+        c, radio, _ = ssh_env(BORKED_CFG)
+        _arm_crm(monkeypatch, fake)
+        j = rename(c, name="Cher").json()
+        assert j["result"] == "success", j
+        assert j["crm_rename"]["state"] == "skipped"
+        assert "single word" in j["crm_rename"]["message"]
+        assert any("single word" in w for w in j["warnings"])
+        assert fake.calls == []
+        assert "resolv.host.1.name=Cher" in radio.cfg()
+    finally:
+        fake.close()
+
+
+def test_crm_company_skipped(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(), _client(client_type=2, first="", last="Acme Fiber"))
+    try:
+        c, radio, _ = ssh_env(BORKED_CFG)
+        _arm_crm(monkeypatch, fake)
+        j = rename(c).json()
+        assert j["result"] == "success" and j["applied"], j
+        assert j["crm_rename"]["state"] == "skipped"
+        assert "clientType" in j["crm_rename"]["message"]
+        assert any("clientType" in w for w in j["warnings"])
+        assert _patches(fake) == []
+        assert any(call["path"] == "/crm/clients/3132" and call["method"] == "GET" for call in fake.calls)
+        assert_standard(radio.cfg())
+    finally:
+        fake.close()
+
+
+def test_crm_no_ucrm_link_skipped(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(client_id=None), _client())
+    try:
+        c, radio, _ = ssh_env(BORKED_CFG)
+        _arm_crm(monkeypatch, fake)
+        j = rename(c).json()
+        assert j["result"] == "success" and j["applied"], j
+        assert j["crm_rename"]["state"] == "skipped"
+        assert "ucrm.client" in j["crm_rename"]["message"]
+        assert any("ucrm.client" in w for w in j["warnings"])
+        assert not any(call["path"].startswith("/crm/") for call in fake.calls)
+        assert any(call["path"] == "/nms/sites/site-1" for call in fake.calls)
+        assert_standard(radio.cfg())
+    finally:
+        fake.close()
+
+
+def test_crm_tower_site_skipped(ssh_env, monkeypatch):
+    fake = FakeUisp(
+        [_station(site_type="site", site_id="tower-9", site_name="03_PRYHUT")],
+        _site(name="03_PRYHUT", site_id="tower-9", site_type="site", client_id=3132),
+        _client(),
+    )
+    try:
+        c, radio, _ = ssh_env(BORKED_CFG)
+        _arm_crm(monkeypatch, fake)
+        j = rename(c).json()
+        assert j["result"] == "success" and j["applied"], j
+        assert j["crm_rename"]["state"] == "skipped"
+        assert j["crm_rename"]["site_id"] == "tower-9"
+        assert any("endpoint" in w for w in j["warnings"])
+        assert not any(call["path"].startswith("/crm/") for call in fake.calls)
+        assert _patches(fake) == []
+        assert_standard(radio.cfg())
+    finally:
+        fake.close()
+
+
+def test_crm_dry_run_does_not_patch(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(), _client())
+    try:
+        c, radio, _ = ssh_env(BORKED_CFG)
+        _arm_crm(monkeypatch, fake)
         j = rename(c, dry_run=True).json()
         assert j["result"] == "success" and j["dry_run"] is True, j
-        assert j["site_rename"]["before"] == "Old Customer"
-        assert j["site_rename"]["after"] == "Mike Roberts"
-        assert "would rename" in j["site_rename"]["message"]
-        assert "no PUT" in j["site_rename"]["message"]
-        assert not any(call["method"] == "PUT" for call in fake.calls)
-        assert any(call["method"] == "GET" and call["path"] == "/sites/site-1" for call in fake.calls)
+        assert j["crm_rename"]["state"] == "skipped"
+        assert j["crm_rename"]["before"] == {"firstName": "Mikettt", "lastName": "Robertrssa"}
+        assert j["crm_rename"]["after"] == {"firstName": "Mike", "lastName": "Roberts"}
+        assert "would PATCH" in j["crm_rename"]["message"]
+        assert "no PATCH" in j["crm_rename"]["message"]
+        assert _patches(fake) == []
+        assert any(call["method"] == "GET" and call["path"] == "/nms/sites/site-1" for call in fake.calls)
+        assert any(call["method"] == "GET" and call["path"] == "/crm/clients/3132" for call in fake.calls)
         assert radio.cfg() == BORKED_CFG
     finally:
         fake.close()
 
 
-def test_uisp_site_rename_disabled_skips_without_calling(ssh_env, monkeypatch):
-    fake = FakeUisp([_station()], _site())
+def test_crm_flag_off_makes_no_calls(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(), _client())
     try:
         c, radio, _ = ssh_env(BORKED_CFG)
-        _arm_site_rename(monkeypatch, fake, enabled=False)
+        _arm_crm(monkeypatch, fake, enabled=False)
         j = rename(c).json()
         assert j["result"] == "success", j
-        assert j["site_rename"]["state"] == "skipped"
-        assert any("UISP_RENAME_SITE" in w for w in j["warnings"])
+        assert j["crm_rename"]["state"] == "skipped"
+        assert any("UISP_RENAME_CRM_CLIENT" in w for w in j["warnings"])
         assert fake.calls == []
         assert_standard(radio.cfg())
     finally:
         fake.close()
 
 
-def test_uisp_site_rename_error_keeps_radio_success(ssh_env, monkeypatch):
-    fake = FakeUisp([_station()], _site(), put_status=500)
+def test_crm_error_after_radio_success(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(), _client(), patch_status=400)
     try:
         c, radio, _ = ssh_env(BORKED_CFG)
-        _arm_site_rename(monkeypatch, fake)
+        _arm_crm(monkeypatch, fake)
         r = rename(c)
         j = r.json()
         assert r.status_code == 200 and j["result"] == "success", j
         assert j["saved"] and j["applied"]
-        assert j["site_rename"]["state"] == "failed"
-        assert "500" in j["site_rename"]["message"]
+        assert j["crm_rename"]["state"] == "failed"
+        assert "400" in j["crm_rename"]["message"]
         assert_standard(radio.cfg())
-        assert fake.site["identification"]["name"] == "Old Customer"
-    finally:
-        fake.close()
-
-
-def test_uisp_site_rename_unchanged_when_name_matches(ssh_env, monkeypatch):
-    fake = FakeUisp([_station(site_name="Mike Roberts")], _site(name="Mike Roberts"))
-    try:
-        c, radio, log = ssh_env(BORKED_CFG)
-        _arm_site_rename(monkeypatch, fake, write_token="", api_token="api-token-test")
-        j = rename(c).json()
-        assert j["result"] == "success" and j["applied"], j
-        assert j["site_rename"]["state"] == "unchanged"
-        assert j["site_rename"]["before"] == "Mike Roberts"
-        assert j["site_rename"]["after"] == "Mike Roberts"
-        assert not any(call["method"] == "PUT" for call in fake.calls)
-        assert fake.calls and all(call["token"] == "api-token-test" for call in fake.calls)
-        assert "api-token-test" not in log.read_text()
-        assert_standard(radio.cfg())
+        assert fake.client["firstName"] == "Mikettt"
     finally:
         fake.close()
 

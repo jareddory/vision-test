@@ -35,7 +35,6 @@ All settings come from environment variables (systemd EnvironmentFile
 """
 from __future__ import annotations
 
-import copy
 import hmac
 import ipaddress
 import json
@@ -117,11 +116,11 @@ class Settings:
         self.cpe_syslog_port = env.get("CPE_SYSLOG_PORT", "514")
         self.uisp_base_url = env.get("UISP_BASE_URL", "https://uisp.btwi.net/nms/api/v2.1").rstrip("/")
         self.uisp_api_token = env.get("UISP_API_TOKEN", "")
-        # Off until the PUT /sites body is confirmed against the live NMS swagger.
-        self.uisp_rename_site = _bool(env.get("UISP_RENAME_SITE"), False)
-        # Write calls prefer this token. Empty falls back to UISP_API_TOKEN.
-        self.uisp_write_token = env.get("UISP_WRITE_TOKEN", "")
         self.uisp_timeout = float(env.get("UISP_TIMEOUT", "30"))
+        # CRM client rename. Off by default. The NMS site name is generated from this client.
+        self.uisp_rename_crm_client = _bool(env.get("UISP_RENAME_CRM_CLIENT"), False)
+        self.uisp_crm_base_url = env.get("UISP_CRM_BASE_URL", "https://uisp.btwi.net/crm/api/v1.0").rstrip("/")
+        self.uisp_crm_app_key = env.get("UISP_CRM_APP_KEY", "")
         for k, v in (("CPE_SNMP_COMMUNITY", self.cpe_snmp_community), ("CPE_SNMP_CONTACT", self.cpe_snmp_contact),
                      ("CPE_SYSLOG_PORT", self.cpe_syslog_port)):
             if not v or any(c in v for c in "|&\\'\"`\n\r"):
@@ -534,19 +533,14 @@ def _uisp_request(method: str, path: str, budget: "TimeBudget | None" = None,
     headers = {"x-auth-token": auth, "accept": "application/json"}
     timeout = (connect_timeout, read_timeout)
     try:
-        if method == "GET":
-            r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=False)
-        elif method == "PUT":
-            r = requests.put(url, headers=headers, timeout=timeout, json=body, allow_redirects=False)
-        else:
+        if method != "GET":
             raise RuntimeError(f"UISP method {method} is not used")
+        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=False)
     except requests.exceptions.RequestException:
         raise RuntimeError(f"UISP unreachable ({method} {path.split('?')[0]})")
     short = path.split("?")[0]
     if r.status_code in (301, 302, 303, 307, 308):
         raise RuntimeError(f"UISP {short} returned HTTP {r.status_code} redirect; not followed")
-    if method == "PUT" and r.status_code in (200, 201, 204):
-        return None
     if r.status_code != 200:
         raise RuntimeError(f"UISP {short} returned HTTP {r.status_code}")
     return r.json()
@@ -625,8 +619,9 @@ def uisp_location(ip: str, device_id: str | None, mac: str | None, budget: "Time
     return out
 
 
-def _site_rename_result(state: str, site_id: str, before: str | None, after: str | None, message: str) -> dict:
-    return {"state": state, "site_id": site_id, "before": before, "after": after, "message": message}
+def _crm_result(state: str, client_id, site_id: str, before, after, message: str) -> dict:
+    return {"state": state, "client_id": client_id, "site_id": site_id,
+            "before": before, "after": after, "message": message}
 
 
 def _device_site_ref(dev: dict) -> tuple[str, str]:
@@ -638,69 +633,149 @@ def _device_site_ref(dev: dict) -> tuple[str, str]:
     return str(site.get("id") or ""), str(site.get("type") or "")
 
 
-def rename_customer_uisp_site(ip: str, name: str, device_id: str | None, mac: str | None,
-                              dry_run: bool, radio_saved: bool, radio_applied: bool,
-                              budget: "TimeBudget") -> tuple[dict, str]:
-    """Rename the customer's endpoint/client site. Never the device, never a tower.
+def split_crm_name(raw_name: Any, first_override: Any = None, last_override: Any = None) -> tuple[dict | None, str]:
+    """Vision name -> CRM firstName/lastName. The first word is the first name; the rest is the last name.
 
-    Returns (site_rename, warning). A UISP error is reported here and does not raise,
-    so a finished radio rename is left in place. The token is not put in either value.
+    crm_first_name and crm_last_name, when non-blank, replace that half of the split.
+    Uses the Vision name as sent, not the airOS device-name sanitizer.
     """
-    intended = name
-    if not S.uisp_rename_site:
-        msg = "UISP site rename is off (UISP_RENAME_SITE is not true)"
-        return _site_rename_result("skipped", "", None, intended, msg), msg
-    if not (dry_run or (radio_saved and radio_applied)):
-        msg = "radio was not changed; UISP site was not renamed"
-        return _site_rename_result("skipped", "", None, intended, msg), ""
-    token = (S.uisp_write_token or S.uisp_api_token or "").strip()
-    if not token:
-        msg = "UISP site rename skipped; set UISP_WRITE_TOKEN or UISP_API_TOKEN"
-        return _site_rename_result("skipped", "", None, intended, msg), msg
+    parts = str(raw_name or "").split()
+    first = parts[0] if parts else ""
+    last = " ".join(parts[1:]) if len(parts) > 1 else ""
+    if str(first_override or "").strip():
+        first = str(first_override).strip()
+    if str(last_override or "").strip():
+        last = str(last_override).strip()
+    if not first or not last:
+        return None, ("CRM rename needs a first and last name; the Vision name has a single word "
+                      "and crm_first_name/crm_last_name did not supply both")
+    return {"firstName": first, "lastName": last}, ""
+
+
+def _ucrm_client_id(site: dict):
+    ucrm = site.get("ucrm") if isinstance(site, dict) else None
+    client = ucrm.get("client") if isinstance(ucrm, dict) else None
+    if not isinstance(client, dict):
+        return None
+    cid = client.get("id")
+    if cid in (None, ""):
+        return None
+    return cid
+
+
+def _crm_request(method: str, path: str, budget: "TimeBudget | None" = None, body: dict | None = None) -> Any:
+    """CRM call. The app key is a header only and is never put in an error or a log line."""
+    read_timeout = S.uisp_timeout
+    connect_timeout = S.connect_timeout
+    if budget is not None:
+        read_timeout = budget.slice(read_timeout)
+        connect_timeout = min(connect_timeout, read_timeout)
+    url = f"{S.uisp_crm_base_url}{path}"
+    headers = {"X-Auth-App-Key": S.uisp_crm_app_key, "accept": "application/json"}
+    timeout = (connect_timeout, read_timeout)
     try:
-        dev, err = uisp_find_station(
-            ip, device_id, mac, lambda path: _uisp_request("GET", path, budget, token))
+        if method == "GET":
+            r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=False)
+        elif method == "PATCH":
+            r = requests.patch(url, headers=headers, timeout=timeout, json=body, allow_redirects=False)
+        else:
+            raise RuntimeError(f"CRM method {method} is not used")
+    except requests.exceptions.RequestException:
+        raise RuntimeError(f"CRM unreachable ({method} {path.split('?')[0]})")
+    short = path.split("?")[0]
+    if r.status_code in (301, 302, 303, 307, 308):
+        raise RuntimeError(f"CRM {short} returned HTTP {r.status_code} redirect; not followed")
+    if method == "PATCH" and r.status_code in (200, 204):
+        return None
+    if r.status_code != 200:
+        raise RuntimeError(f"CRM {short} returned HTTP {r.status_code}")
+    return r.json()
+
+
+def _crm_names(client: dict) -> dict:
+    return {"firstName": str(client.get("firstName") or ""), "lastName": str(client.get("lastName") or "")}
+
+
+def rename_crm_client(ip: str, raw_name: str, first_override: Any, last_override: Any,
+                      device_id: str | None, mac: str | None, dry_run: bool,
+                      radio_saved: bool, radio_applied: bool, budget: "TimeBudget") -> tuple[dict, str]:
+    """Rename the UISP CRM residential client. Does not PUT the NMS site or the device.
+
+    The site name is generated from the CRM client, so a site PUT would be overwritten.
+    Returns (crm_rename, warning). CRM and NMS errors do not raise.
+    """
+    empty = {"firstName": None, "lastName": None}
+    if not S.uisp_rename_crm_client:
+        msg = "CRM client rename is off (UISP_RENAME_CRM_CLIENT is not true)"
+        return _crm_result("skipped", None, "", empty, empty, msg), msg
+    if not (dry_run or (radio_saved and radio_applied)):
+        msg = "radio was not changed; CRM client was not renamed"
+        return _crm_result("skipped", None, "", empty, empty, msg), ""
+    after, name_err = split_crm_name(raw_name, first_override, last_override)
+    if name_err or not after:
+        return _crm_result("skipped", None, "", empty, empty, name_err), name_err
+    if not (S.uisp_crm_app_key or "").strip():
+        msg = "CRM client rename skipped; UISP_CRM_APP_KEY is not set"
+        return _crm_result("skipped", None, "", empty, after, msg), msg
+    if not (S.uisp_api_token or "").strip():
+        msg = "CRM client rename skipped; UISP_API_TOKEN is not set"
+        return _crm_result("skipped", None, "", empty, after, msg), msg
+    site_id = ""
+    client_id = None
+    try:
+        dev, err = uisp_find_station(ip, device_id, mac, lambda path: _uisp_get(path, budget))
         if err or not dev:
             msg = err or "CPE not found in UISP"
-            return _site_rename_result("skipped", "", None, intended, msg), msg
+            return _crm_result("skipped", None, "", empty, after, msg), msg
         site_id, site_type = _device_site_ref(dev)
         if not site_id:
-            msg = "UISP device has no site; site was not renamed"
-            return _site_rename_result("skipped", "", None, intended, msg), msg
-        if site_type and site_type.lower() not in _ENDPOINT_SITE_TYPES:
-            msg = (f"UISP site {site_id} type is {site_type}; "
-                   "only an endpoint or client site is renamed")
-            return _site_rename_result("skipped", site_id, None, intended, msg), msg
-        site = _uisp_request("GET", f"/sites/{site_id}", budget, token)
+            msg = "UISP device has no site; CRM client was not renamed"
+            return _crm_result("skipped", None, "", empty, after, msg), msg
+        site = _uisp_get(f"/sites/{site_id}", budget)
         if not isinstance(site, dict):
             msg = f"UISP site {site_id} response was not an object"
-            return _site_rename_result("failed", site_id, None, intended, msg), msg
+            return _crm_result("failed", None, site_id, empty, after, msg), msg
         ident = site.get("identification") if isinstance(site.get("identification"), dict) else {}
         if not site_type:
             site_type = str(ident.get("type") or "")
-            if site_type.lower() not in _ENDPOINT_SITE_TYPES:
-                msg = (f"UISP site {site_id} type is {site_type or 'unknown'}; "
-                       "only an endpoint or client site is renamed")
-                return _site_rename_result("skipped", site_id, None, intended, msg), msg
-        before = ident.get("name") if isinstance(ident.get("name"), str) else ""
-        if before == intended:
-            return _site_rename_result("unchanged", site_id, before, intended,
-                                       "UISP site name already matches"), ""
+        if site_type.lower() not in _ENDPOINT_SITE_TYPES:
+            msg = (f"UISP site {site_id} type is {site_type or 'unknown'}; "
+                   "only an endpoint or client site is linked to a CRM rename")
+            return _crm_result("skipped", None, site_id, empty, after, msg), msg
+        client_id = _ucrm_client_id(site)
+        if client_id is None:
+            msg = f"UISP site {site_id} has no ucrm.client; CRM client was not renamed"
+            return _crm_result("skipped", None, site_id, empty, after, msg), msg
+        client = _crm_request("GET", f"/clients/{client_id}", budget)
+        if not isinstance(client, dict):
+            msg = f"CRM client {client_id} response was not an object"
+            return _crm_result("failed", client_id, site_id, empty, after, msg), msg
+        try:
+            residential = int(client.get("clientType")) == 1
+        except (TypeError, ValueError):
+            residential = False
+        if not residential:
+            msg = (f"CRM client {client_id} clientType is {client.get('clientType')!r}; "
+                   "only residential clients (clientType 1) are renamed")
+            return _crm_result("skipped", client_id, site_id, _crm_names(client), after, msg), msg
+        before = _crm_names(client)
+        if before == after:
+            return _crm_result("unchanged", client_id, site_id, before, after,
+                               "CRM client name already matches"), ""
         if dry_run:
-            msg = f"dry run: would rename the endpoint site from {before!r} to {intended!r}; no PUT sent"
-            return _site_rename_result("skipped", site_id, before, intended, msg), ""
-        payload = copy.deepcopy(site)
-        if not isinstance(payload.get("identification"), dict):
-            payload["identification"] = {}
-        payload["identification"]["name"] = intended
-        _uisp_request("PUT", f"/sites/{site_id}", budget, token, payload)
-        return _site_rename_result("renamed", site_id, before, intended, "UISP endpoint site renamed"), ""
+            msg = (f"dry run: would PATCH client {client_id} "
+                   f"firstName {before['firstName']!r} -> {after['firstName']!r}, "
+                   f"lastName {before['lastName']!r} -> {after['lastName']!r}; no PATCH sent")
+            return _crm_result("skipped", client_id, site_id, before, after, msg), ""
+        _crm_request("PATCH", f"/clients/{client_id}", budget,
+                     {"firstName": after["firstName"], "lastName": after["lastName"]})
+        return _crm_result("renamed", client_id, site_id, before, after, "CRM client renamed"), ""
     except (RuntimeError, RenameError) as e:
         msg = str(e)
-        return _site_rename_result("failed", "", None, intended, msg), msg
+        return _crm_result("failed", client_id, site_id, empty, after or empty, msg), msg
     except Exception:
-        msg = "UISP site rename failed"
-        return _site_rename_result("failed", "", None, intended, msg), msg
+        msg = "CRM client rename failed"
+        return _crm_result("failed", client_id, site_id, empty, after or empty, msg), msg
 
 
 def parse_cfg(text: str) -> dict[str, list[str]]:
@@ -1176,6 +1251,8 @@ async def rename_cpe(request: Request):
         if dev_id and not UUID_RE.match(dev_id):
             raise ValueError("uisp_device_id must be a UISP device UUID")
         mac = norm_mac(data.get("mac")) if data.get("mac") not in (None, "") else None
+        crm_first = data.get("crm_first_name")
+        crm_last = data.get("crm_last_name")
     except ValueError as e:
         write_log({**entry, "result": "failed", "message": str(e)})
         return respond(False, str(e), wid, 400, name=raw_name.strip())
@@ -1246,14 +1323,17 @@ async def rename_cpe(request: Request):
         msg = f"Renamed {ip} to {name} and applied the CPE standard ({len(res['changed_keys'])} key(s) changed); link drops for a few seconds"
     if location_source == "none":
         msg += "; snmp.location NOT set (no location)"
-    site_rename, site_warning = rename_customer_uisp_site(
-        ip, name, dev_id, mac, dry_run, bool(res.get("saved")), bool(res.get("applied")), budget)
-    if site_warning:
-        warnings.append(site_warning)
-    res["site_rename"] = site_rename
+    crm_rename, crm_warning = rename_crm_client(
+        ip, raw_name, crm_first, crm_last, dev_id, mac, dry_run,
+        bool(res.get("saved")), bool(res.get("applied")), budget)
+    if crm_warning:
+        warnings.append(crm_warning)
+    res["crm_rename"] = crm_rename
     public = redact_community(res)
+    logged_crm = public.get("crm_rename") or {}
     write_log({**entry, "result": "success", "message": msg, "state": st, "changed_keys": public["changed_keys"],
                "saved": public["saved"], "applied": public["applied"],
-               "site_rename": (public.get("site_rename") or {}).get("state"),
-               "site_id": (public.get("site_rename") or {}).get("site_id")})
+               "crm_rename": logged_crm.get("state"),
+               "client_id": logged_crm.get("client_id"),
+               "site_id": logged_crm.get("site_id")})
     return respond(True, msg, wid, **base, warnings=warnings, **public)

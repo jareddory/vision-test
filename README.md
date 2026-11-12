@@ -154,15 +154,19 @@ Each changed key is replaced in place, or appended when the line is missing. `sn
 
 A dry run returns `state: dry_run` plus `changed_keys` and the before/after `keys` map. A radio that already matches returns `state: already_compliant` and does not save or restart. A real change returns `state: changed` with `saved` and `applied`.
 
-### UISP endpoint site
+### UISP CRM client
 
-After the radio is saved and the soft restart is applied, the service can rename the customer's UISP site (the endpoint map dot the CPE belongs to) to the same sanitized name. It does not rename the UISP device. The lookup is `uisp_device_id`, else MAC (that device's IP must be the IP in the call), else IP. `identification.site.type` must be `endpoint` or `client`. A tower site (`type` `site`) is left alone and the response includes a warning.
+BTWI endpoint sites are linked to UISP CRM. The map-dot name is generated from the CRM client as "Last, First", so a `PUT /sites` would be overwritten by CRM sync. This step renames the CRM client instead, and it does not rename the NMS site or the NMS device.
 
-The rename is `GET /sites/{id}` then `PUT /sites/{id}` with that same body and only `identification.name` changed, so address, location, and parent stay as they were. Redirects are not followed. Both calls use `UISP_WRITE_TOKEN`, or `UISP_API_TOKEN` when the write token is unset, and they count against `RENAME_TIME_BUDGET_SECONDS`.
+It runs after a radio rename that saved and applied. The lookup is `uisp_device_id`, else MAC (that device's IP must be the IP in the call), else IP. It reads `identification.site.id`, GETs that site with the NMS read token (`x-auth-token: UISP_API_TOKEN`), and uses `ucrm.client.id`. A tower site (`type` `site`) or a site with no `ucrm.client` is skipped with a warning.
 
-`UISP_RENAME_SITE` defaults to false. While it is off, or when no token is set, the site is skipped, a warning is added, and the radio result is still success. A UISP error does not fail the call and does not roll the radio back. The response field `site_rename` is `{state, site_id, before, after, message}` with `state` one of `renamed`, `unchanged`, `skipped`, or `failed`. A dry run GETs the site and does not PUT. When the name would change, `state` is `skipped` and `message` says what it would rename. When the name already matches, `state` is `unchanged`. Tokens are not logged.
+The Vision name is split on whitespace: the first word is `firstName` and the rest is `lastName` (`Mike Roberts` becomes Mike / Roberts, `Mary Jo Smith` becomes Mary / Jo Smith). Optional `crm_first_name` and `crm_last_name` replace those halves. A single word, with neither half supplied by an override, is skipped with a warning. This split uses the Vision name as sent, not the airOS device-name sanitizer.
 
-Confirm the PUT body against the live NMS swagger at `/nms/api-docs` before setting `UISP_RENAME_SITE` to true. The shape above matches UISP NMS v2.1 `SiteOverview`, and it still has to be checked on the running controller.
+`GET {UISP_CRM_BASE_URL}/clients/{id}` uses header `X-Auth-App-Key: UISP_CRM_APP_KEY`. Only `clientType` 1 (residential) is changed. A company is skipped with a warning. When the names already match, `state` is `unchanged` and nothing is patched. Otherwise the call is `PATCH /clients/{id}` with JSON `{"firstName", "lastName"}` only. Redirects are not followed. The calls count against `RENAME_TIME_BUDGET_SECONDS`.
+
+`UISP_RENAME_CRM_CLIENT` defaults to false. While it is off, or when `UISP_CRM_APP_KEY` or `UISP_API_TOKEN` is missing, the step is skipped, a warning is added, and the radio result is still success. A CRM or NMS error does not fail the call and does not roll the radio back. The response field `crm_rename` is `{state, client_id, site_id, before, after, message}` with `state` one of `renamed`, `unchanged`, `skipped`, or `failed`. `before` and `after` are `{firstName, lastName}`. A dry run does the GETs and does not PATCH. When the name would change, `state` is `skipped` and `message` says what it would patch. Keys are not logged.
+
+`UISP_CRM_BASE_URL` defaults to `https://uisp.btwi.net/crm/api/v1.0`.
 
 ### nginx
 
