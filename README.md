@@ -41,6 +41,7 @@ When result equals failed, create the manual task.
 - /reboot-cpe (GET/POST) — Reboot a CPE (refuses if unreachable). Params: mac, ip
 - /cancel-cpe (GET/POST) — For cancellations. Deletes the matched CPE and, if the site is then empty, the site. Does not check whether the CPE is offline and does not reboot (Vision owns reboot and manual kick-on-fail first). Name fallback if IP fails. Params: mac, name (recommended), ip (optional)
 - /rename-cpe (GET/POST) — Rename a CPE in UISP and push a sanitized hostname to the radio (airMAX/airOS only for now). Strict MAC + IP match. Params: mac, ip, name, location (optional; blank = none), dry_run (optional), push_hostname (optional, default true)
+- radio-kick /rename-cpe (GET/POST, `ssh_service.py`) — SSH to the one IP in the call, set the radio name, and apply the SNMP and syslog standard. Served at `https://api.btwi.net/radio-kick/rename-cpe`. See [Radio-kick /rename-cpe](#radio-kick-rename-cpe).
 - /outage-check (GET/POST) — Check if device is offline or in an outage. Params: mac, ip
 - /device-status (GET/POST) — Detailed status. Params: mac, ip
 - /signal-history (GET/POST) — Signal statistics. Params: mac, ip, interval
@@ -98,6 +99,66 @@ https://vision-test-yz19.onrender.com/rename-cpe?mac=70:A7:41:44:AC:10&ip=172.20
 
 Success response fields: old_name, new_name, new_hostname, old_hostname, device_id, device_type, match_method (mac+ip), changed {uisp, radio}, would_change (dry_run / no-change), uisp_warning (present when UISP returned an error after the alias had saved), radio_status (pushed, would_push, already_named, unsupported_device_type, skipped_disabled, skipped_empty_hostname), dry_run.
 On failure after the UISP rename succeeded (for example the radio push failed), result is failed and changed shows {"uisp": true, "radio": false} so Vision can open a manual task to set the hostname. That failure also includes uisp_warning when the alias PUT returned an error that was accepted because the alias had saved.
+
+## Radio-kick /rename-cpe
+
+`ssh_service.py` serves this endpoint at `https://api.btwi.net/radio-kick/rename-cpe`. It is a per-call service, not a network crawl. Vision's webhook, or anyone with the secret, calls it with GET or POST. The call carries one radio's IP and the customer's name. The service SSHes into just that radio, sets the hostname from the Vision name, and applies the BTWI SNMP and syslog standard. It reads `/tmp/system.cfg` before the edit and checks the same keys again after the edit, before anything is saved.
+
+The single IP in the call is the only device this step will touch. The value has to be one IPv4 address. Malformed input and anything that is not a single IP (a prefix, a list, a hostname) is rejected, and no connection is opened.
+
+### Call inputs
+
+| field | required | notes |
+|---|---|---|
+| `ip` (alias `cpe_ip`, `radio_ip`) | yes | The one radio to SSH to. One IPv4 address. |
+| `name` | yes | Vision customer name. Whitespace becomes `-`, other punctuation is removed, max 32 characters (`Mike Roberts` becomes `Mike-Roberts`). |
+| `snmp_location` | no | SNMP location override, for example `HUT W`. When this is set, UISP is not consulted. |
+| `uisp_device_id` | no | UISP device id of this CPE. Used to look up the tower and sector when `snmp_location` is omitted. |
+| `mac` | no | CPE MAC. Used for the same tower and sector lookup when `uisp_device_id` is omitted. |
+| `workflow_id` | no | Vision workflow id. Echoed back and logged. |
+| `dry_run` | no | Reads the radio and returns the diff. The config is not changed, saved, or restarted. |
+
+Auth matches `/kick`: `Authorization: Bearer <secret>`, the `X-Webhook-Secret` header, or `secret` in the body. `?secret=` is accepted only when `ALLOW_QUERY_SECRET=true`.
+
+### Server settings
+
+These are process environment variables, not fields on the call. The template is `radio-kick.env.example` (placeholders only; the filled file stays off the repo).
+
+`RADIO_SSH_KNOWN_HOSTS` chooses how host keys are checked. Point it at an OpenSSH known_hosts file and unknown or changed keys are rejected. Leave it blank and the service accepts the radio's key the first time it connects.
+
+SSH login, port, timeouts, the SNMP community and contact, and the syslog collector are the other server settings (`RADIO_SSH_USER`, `RADIO_SSH_PASSWORD`, `RADIO_SSH_PORT`, `CPE_SNMP_COMMUNITY`, `CPE_SNMP_CONTACT`, `CPE_SYSLOG_IP`, `CPE_SYSLOG_PORT`). `UISP_BASE_URL` and `UISP_API_TOKEN` are used only for the optional tower and sector lookup (read-only GETs). With no token, and no `snmp_location` override, `snmp.location` is left as it is.
+
+### What gets written
+
+Each changed key is replaced in place, or appended when the line is missing. `snmp.location` is written only when the override or the UISP lookup produced a tower and sector. A soft restart then applies the saved config and the customer link drops for a few seconds.
+
+| key | value |
+|---|---|
+| `resolv.host.1.name` | sanitized Vision name |
+| `snmp.status` | `enabled` |
+| `snmp.community` | `BTWI` (`CPE_SNMP_COMMUNITY`) |
+| `snmp.contact` | `BTWI` (`CPE_SNMP_CONTACT`) |
+| `snmp.location` | `TOWER SECTOR` when known. Otherwise the key is skipped. |
+| `syslog.status` | `enabled` |
+| `syslog.remote.status` | `enabled` |
+| `syslog.remote.ip` | `10.55.12.244` (`CPE_SYSLOG_IP`) |
+| `syslog.remote.port` | `514` (`CPE_SYSLOG_PORT`) |
+
+A dry run returns `state: dry_run` plus `changed_keys` and the before/after `keys` map. A radio that already matches returns `state: already_compliant` and does not save or restart. A real change returns `state: changed` with `saved` and `applied`.
+
+### nginx
+
+nginx on api.btwi.net proxies `location /radio-kick/` to this service. The rename waits on SSH, `cfgmtd`, and the soft restart, which can take 20–60 seconds, so `proxy_read_timeout` on that location is `90s`. See `nginx-radio-kick.conf.example`.
+
+### Example
+
+```bash
+curl -s -X POST https://api.btwi.net/radio-kick/rename-cpe \
+  -H "Authorization: Bearer $SECRET" -H 'Content-Type: application/json' \
+  -d '{"ip":"203.0.113.10","name":"Mike Roberts","snmp_location":"HUT W","dry_run":true,"workflow_id":"WF-123"}'
+```
+
+`203.0.113.10` is a documentation address. A dry run still opens SSH to that one address and changes nothing.
 
 ## Safety checks
 

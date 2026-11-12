@@ -1,0 +1,21 @@
+# Example nginx server block piece for api.btwi.net (HTTPS via certbot / Let's Encrypt).
+# Put inside the existing "server { listen 443 ssl; server_name api.btwi.net; ... }" block.
+
+location /radio-kick/ {
+    # Allow only Vision's outbound IPs (ask Fibersmith support for the list) + office/VPN
+    # allow 203.0.113.10;      # Vision egress (placeholder)
+    # allow 198.51.100.0/24;   # BTWI office/VPN (placeholder)
+    # deny all;
+
+    access_log off;            # keeps any ?secret= out of nginx logs; the service logs every kick itself
+    client_max_body_size 8k;
+    limit_except POST GET { deny all; }
+
+    proxy_pass http://127.0.0.1:8102/;   # trailing slash strips /radio-kick/
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;   # overwrite, don't append client-supplied values
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 5s;
+    proxy_read_timeout 90s;   # /rename-cpe waits for SSH + cfgmtd + soft restart (up to ~60s)
+}
