@@ -1,0 +1,1735 @@
+{
+"_note": "Real AP names + AP site names from UISP (GET /devices?role=station -> attributes.apDevice, GET /devices?role=ap -> identification.site.name), read-only, 2026-11-11. expected = derive_location() result; null = not split confidently (snmp.location skipped). Re-snapshot if AP naming changes.",
+"aps": [
+{
+"ap_name": "DLBELLAMY2KUONEN",
+"site": "/ Ashley Kuonen, Bellamy Grain Leg Chris",
+"expected": null
+},
+{
+"ap_name": "BOTBHAR2DAW",
+"site": "02_AR",
+"expected": null
+},
+{
+"ap_name": "BOTBHAR2TC",
+"site": "02_AR",
+"expected": null
+},
+{
+"ap_name": "BOTSECAR140",
+"site": "02_AR",
+"expected": "AR 140"
+},
+{
+"ap_name": "BOTSECAR60",
+"site": "02_AR",
+"expected": "AR 60"
+},
+{
+"ap_name": "BOTSECARE",
+"site": "02_AR",
+"expected": "AR E"
+},
+{
+"ap_name": "BOTSECARN",
+"site": "02_AR",
+"expected": "AR N"
+},
+{
+"ap_name": "BOTSECARS",
+"site": "02_AR",
+"expected": "AR S"
+},
+{
+"ap_name": "BOTSECARW",
+"site": "02_AR",
+"expected": "AR W"
+},
+{
+"ap_name": "BOTBHHUT2DJ60",
+"site": "03_PRYHUT",
+"expected": null
+},
+{
+"ap_name": "BOTSECHUTE",
+"site": "03_PRYHUT",
+"expected": "HUT E"
+},
+{
+"ap_name": "BOTSECHUTS",
+"site": "03_PRYHUT",
+"expected": "HUT S"
+},
+{
+"ap_name": "BOTSECHUTW",
+"site": "03_PRYHUT",
+"expected": "HUT W"
+},
+{
+"ap_name": "HUT2DJ",
+"site": "03_PRYHUT",
+"expected": null
+},
+{
+"ap_name": "HUT2PWTBU",
+"site": "03_PRYHUT",
+"expected": null
+},
+{
+"ap_name": "hut2javierwhs",
+"site": "03_PRYHUT",
+"expected": null
+},
+{
+"ap_name": "BOTBHNL2LG",
+"site": "04_NL",
+"expected": null
+},
+{
+"ap_name": "BOTBHNL2LG_WAVE",
+"site": "04_NL",
+"expected": null
+},
+{
+"ap_name": "BOTBHNL2SF",
+"site": "04_NL",
+"expected": null
+},
+{
+"ap_name": "BOTDLNL2JL",
+"site": "04_NL",
+"expected": null
+},
+{
+"ap_name": "BOTSECNLE",
+"site": "04_NL",
+"expected": "NL E"
+},
+{
+"ap_name": "BOTSECNLN",
+"site": "04_NL",
+"expected": "NL N"
+},
+{
+"ap_name": "BOTSECNLS5",
+"site": "04_NL",
+"expected": "NL S5"
+},
+{
+"ap_name": "BOTSECNLW5",
+"site": "04_NL",
+"expected": "NL W5"
+},
+{
+"ap_name": "BOTBHGM2PF",
+"site": "05_GM",
+"expected": null
+},
+{
+"ap_name": "BOTDLGARYMASH",
+"site": "05_GM",
+"expected": null
+},
+{
+"ap_name": "BOTSECGMNE",
+"site": "05_GM",
+"expected": "GM NE"
+},
+{
+"ap_name": "BOTSECGMNW",
+"site": "05_GM",
+"expected": "GM NW"
+},
+{
+"ap_name": "BOTSECGMS",
+"site": "05_GM",
+"expected": "GM S"
+},
+{
+"ap_name": "BOTBHPF2SHA",
+"site": "06_PF",
+"expected": null
+},
+{
+"ap_name": "BOTSECPFE",
+"site": "06_PF",
+"expected": "PF E"
+},
+{
+"ap_name": "BOTSECPFSW",
+"site": "06_PF",
+"expected": "PF SW"
+},
+{
+"ap_name": "BOTBHMK2TP",
+"site": "07_MK",
+"expected": null
+},
+{
+"ap_name": "BOTDLMKGrainShack2CenterShop",
+"site": "07_MK",
+"expected": null
+},
+{
+"ap_name": "BOTSECMKE",
+"site": "07_MK",
+"expected": "MK E"
+},
+{
+"ap_name": "BOTSECMKS",
+"site": "07_MK",
+"expected": "MK S"
+},
+{
+"ap_name": "BOTSECMKSS",
+"site": "07_MK",
+"expected": "MK SS"
+},
+{
+"ap_name": "BOTSECMKW",
+"site": "07_MK",
+"expected": "MK W"
+},
+{
+"ap_name": "BOTBHKOA2CIB",
+"site": "08_KOA",
+"expected": null
+},
+{
+"ap_name": "BOTBHKOA2DEX",
+"site": "08_KOA",
+"expected": null
+},
+{
+"ap_name": "BOTBHKOA2VM",
+"site": "08_KOA",
+"expected": null
+},
+{
+"ap_name": "BOTBHKOAFF2KOA",
+"site": "08_KOA",
+"expected": null
+},
+{
+"ap_name": "BOTSECKOAE",
+"site": "08_KOA",
+"expected": "KOA E"
+},
+{
+"ap_name": "BOTSECKOAN",
+"site": "08_KOA",
+"expected": "KOA N"
+},
+{
+"ap_name": "BOTSECKOAS",
+"site": "08_KOA",
+"expected": "KOA S"
+},
+{
+"ap_name": "BOTSECKOAW",
+"site": "08_KOA",
+"expected": "KOA W"
+},
+{
+"ap_name": "BOTBHLG2GM",
+"site": "10_LG",
+"expected": null
+},
+{
+"ap_name": "BOTBHLG2KOA",
+"site": "10_LG",
+"expected": null
+},
+{
+"ap_name": "BOTOMNILG2.4",
+"site": "10_LG",
+"expected": null
+},
+{
+"ap_name": "BOTSECLGE",
+"site": "10_LG",
+"expected": "LG E"
+},
+{
+"ap_name": "BOTSECLGESE",
+"site": "10_LG",
+"expected": "LG ESE"
+},
+{
+"ap_name": "BOTSECLGN",
+"site": "10_LG",
+"expected": "LG N"
+},
+{
+"ap_name": "BOTSECLGNE",
+"site": "10_LG",
+"expected": "LG NE"
+},
+{
+"ap_name": "BOTSECLGSE",
+"site": "10_LG",
+"expected": "LG SE"
+},
+{
+"ap_name": "BOTSECLGW",
+"site": "10_LG",
+"expected": "LG W"
+},
+{
+"ap_name": "BOTBHRS2BW",
+"site": "11_RS",
+"expected": null
+},
+{
+"ap_name": "BOTRSDL2ANDERSON",
+"site": "11_RS",
+"expected": null
+},
+{
+"ap_name": "BOTSECRSN",
+"site": "11_RS",
+"expected": "RS N"
+},
+{
+"ap_name": "BOTSECRSS",
+"site": "11_RS",
+"expected": "RS S"
+},
+{
+"ap_name": "BOTBHMB2MK",
+"site": "13_MB",
+"expected": null
+},
+{
+"ap_name": "BOTSECMB240",
+"site": "13_MB",
+"expected": "MB 240"
+},
+{
+"ap_name": "BOTSECMBE5",
+"site": "13_MB",
+"expected": "MB E5"
+},
+{
+"ap_name": "BOTSECMBN5",
+"site": "13_MB",
+"expected": "MB N5"
+},
+{
+"ap_name": "BOTSECMBSE",
+"site": "13_MB",
+"expected": "MB SE"
+},
+{
+"ap_name": "BOTSECMBSW",
+"site": "13_MB",
+"expected": "MB SW"
+},
+{
+"ap_name": "BOTSECMBW",
+"site": "13_MB",
+"expected": "MB W"
+},
+{
+"ap_name": "BOTBH150TH2AHQ",
+"site": "150TH.",
+"expected": null
+},
+{
+"ap_name": "BOTBH150TH2SR",
+"site": "150TH.",
+"expected": null
+},
+{
+"ap_name": "BOTSEC150E",
+"site": "150TH.",
+"expected": "150 E"
+},
+{
+"ap_name": "BOTSEC150N",
+"site": "150TH.",
+"expected": "150 N"
+},
+{
+"ap_name": "BOTSEC150S",
+"site": "150TH.",
+"expected": "150 S"
+},
+{
+"ap_name": "BOTSEC150W",
+"site": "150TH.",
+"expected": "150 W"
+},
+{
+"ap_name": "BOTSECMBTSW",
+"site": "16MBT",
+"expected": "MBT SW"
+},
+{
+"ap_name": "BOTBHPWT2MB",
+"site": "17_PWT",
+"expected": null
+},
+{
+"ap_name": "BOTBHPWT2MIN",
+"site": "17_PWT",
+"expected": null
+},
+{
+"ap_name": "BOTBHPWT2MK",
+"site": "17_PWT",
+"expected": null
+},
+{
+"ap_name": "BOTBHPWT2NL",
+"site": "17_PWT",
+"expected": null
+},
+{
+"ap_name": "BOTBHPWT2SF_WAVE",
+"site": "17_PWT",
+"expected": null
+},
+{
+"ap_name": "BOTSECPWT015",
+"site": "17_PWT",
+"expected": "PWT 015"
+},
+{
+"ap_name": "BOTSECPWT045",
+"site": "17_PWT",
+"expected": "PWT 045"
+},
+{
+"ap_name": "BOTSECPWT075",
+"site": "17_PWT",
+"expected": "PWT 075"
+},
+{
+"ap_name": "BOTSECPWT120",
+"site": "17_PWT",
+"expected": "PWT 120"
+},
+{
+"ap_name": "BOTSECPWT180",
+"site": "17_PWT",
+"expected": "PWT 180"
+},
+{
+"ap_name": "BOTSECPWT240",
+"site": "17_PWT",
+"expected": "PWT 240"
+},
+{
+"ap_name": "BOTSECPWT285",
+"site": "17_PWT",
+"expected": "PWT 285"
+},
+{
+"ap_name": "BOTSECPWT315",
+"site": "17_PWT",
+"expected": "PWT 315"
+},
+{
+"ap_name": "BOTSECPWT345",
+"site": "17_PWT",
+"expected": "PWT 345"
+},
+{
+"ap_name": "PWTWAVENE90",
+"site": "17_PWT",
+"expected": "PWT WAVENE90"
+},
+{
+"ap_name": "PWTWAVENW90",
+"site": "17_PWT",
+"expected": "PWT WAVENW90"
+},
+{
+"ap_name": "PWTWAVEW",
+"site": "17_PWT",
+"expected": "PWT WAVEW"
+},
+{
+"ap_name": "BOTBHTT2MK",
+"site": "19_TT",
+"expected": null
+},
+{
+"ap_name": "BOTSECTTE",
+"site": "19_TT",
+"expected": "TT E"
+},
+{
+"ap_name": "BOTSECTTN",
+"site": "19_TT",
+"expected": "TT N"
+},
+{
+"ap_name": "BOTSECTTS",
+"site": "19_TT",
+"expected": "TT S"
+},
+{
+"ap_name": "BOTSECTTW",
+"site": "19_TT",
+"expected": "TT W"
+},
+{
+"ap_name": "BOTBHTL2CIE",
+"site": "20_TL",
+"expected": null
+},
+{
+"ap_name": "BOTBHTL2CIEWAVE",
+"site": "20_TL",
+"expected": null
+},
+{
+"ap_name": "BOTBHTL2TT",
+"site": "20_TL",
+"expected": null
+},
+{
+"ap_name": "BOTDLTL2Schank",
+"site": "20_TL",
+"expected": null
+},
+{
+"ap_name": "BOTSECTLN",
+"site": "20_TL",
+"expected": "TL N"
+},
+{
+"ap_name": "BOTSECTLSE",
+"site": "20_TL",
+"expected": "TL SE"
+},
+{
+"ap_name": "BOTSECTLSW",
+"site": "20_TL",
+"expected": "TL SW"
+},
+{
+"ap_name": "BOTBHIFB2TL",
+"site": "22_IFB",
+"expected": null
+},
+{
+"ap_name": "BOTSECEEJS",
+"site": "23_EEJ",
+"expected": "EEJ S"
+},
+{
+"ap_name": "BOTBHMS2RS",
+"site": "25_MS",
+"expected": null
+},
+{
+"ap_name": "BOTSECMSW",
+"site": "25_MS",
+"expected": "MS W"
+},
+{
+"ap_name": "MSLOCAL",
+"site": "25_MS",
+"expected": "MS LOCAL"
+},
+{
+"ap_name": "BOTBHBW2EEJ",
+"site": "26_BW",
+"expected": null
+},
+{
+"ap_name": "BOTBHBW2GJC",
+"site": "26_BW",
+"expected": null
+},
+{
+"ap_name": "BOTDLBW2MM",
+"site": "26_BW",
+"expected": null
+},
+{
+"ap_name": "BOTSECBWLOC",
+"site": "26_BW",
+"expected": "BW LOC"
+},
+{
+"ap_name": "BOTSECBWN",
+"site": "26_BW",
+"expected": "BW N"
+},
+{
+"ap_name": "BOTSECBWNW",
+"site": "26_BW",
+"expected": "BW NW"
+},
+{
+"ap_name": "BOTSECBWS",
+"site": "26_BW",
+"expected": "BW S"
+},
+{
+"ap_name": "BOTSECBWW",
+"site": "26_BW",
+"expected": "BW W"
+},
+{
+"ap_name": "BOTSECBWWSW",
+"site": "26_BW",
+"expected": "BW WSW"
+},
+{
+"ap_name": "BOTBHDJ2AR",
+"site": "28_DJ",
+"expected": null
+},
+{
+"ap_name": "BOTBHDJ2MB",
+"site": "28_DJ",
+"expected": null
+},
+{
+"ap_name": "BOTBHDJ2MS",
+"site": "28_DJ",
+"expected": null
+},
+{
+"ap_name": "BOTSECDJ240",
+"site": "28_DJ",
+"expected": "DJ 240"
+},
+{
+"ap_name": "BOTSECDJE5",
+"site": "28_DJ",
+"expected": "DJ E5"
+},
+{
+"ap_name": "BOTSECDJLocal",
+"site": "28_DJ",
+"expected": "DJ LOCAL"
+},
+{
+"ap_name": "BOTSECDJN5",
+"site": "28_DJ",
+"expected": "DJ N5"
+},
+{
+"ap_name": "BOTSECDJS5",
+"site": "28_DJ",
+"expected": "DJ S5"
+},
+{
+"ap_name": "BOTSECDJW5",
+"site": "28_DJ",
+"expected": "DJ W5"
+},
+{
+"ap_name": "BOTSECDRS",
+"site": "29_DR",
+"expected": "DR S"
+},
+{
+"ap_name": "BOTSECTPN",
+"site": "30_TP",
+"expected": "TP N"
+},
+{
+"ap_name": "BOTSECTPSE",
+"site": "30_TP",
+"expected": "TP SE"
+},
+{
+"ap_name": "BOTSECTPSW",
+"site": "30_TP",
+"expected": "TP SW"
+},
+{
+"ap_name": "BOTSECBBP030",
+"site": "33_BBP",
+"expected": "BBP 030"
+},
+{
+"ap_name": "BOTSECBBP060",
+"site": "33_BBP",
+"expected": "BBP 060"
+},
+{
+"ap_name": "BOTSECBBP120",
+"site": "33_BBP",
+"expected": "BBP 120"
+},
+{
+"ap_name": "BOTSECBBP150",
+"site": "33_BBP",
+"expected": "BBP 150"
+},
+{
+"ap_name": "BOTSECBBP180",
+"site": "33_BBP",
+"expected": "BBP 180"
+},
+{
+"ap_name": "BOTSECBBP210",
+"site": "33_BBP",
+"expected": "BBP 210"
+},
+{
+"ap_name": "BOTSECBBP240",
+"site": "33_BBP",
+"expected": "BBP 240"
+},
+{
+"ap_name": "BOTSECBBP270",
+"site": "33_BBP",
+"expected": "BBP 270"
+},
+{
+"ap_name": "BOTSECBBP300",
+"site": "33_BBP",
+"expected": "BBP 300"
+},
+{
+"ap_name": "BOTSECBBP330",
+"site": "33_BBP",
+"expected": "BBP 330"
+},
+{
+"ap_name": "BOTSECBBP360",
+"site": "33_BBP",
+"expected": "BBP 360"
+},
+{
+"ap_name": "BOTSECBBPNELP",
+"site": "33_BBP",
+"expected": "BBP NELP"
+},
+{
+"ap_name": "BOTSECBBPWAVENE",
+"site": "33_BBP",
+"expected": "BBP WAVENE"
+},
+{
+"ap_name": "BOTSECBBPWAVESE",
+"site": "33_BBP",
+"expected": "BBP WAVESE"
+},
+{
+"ap_name": "BOTSECBBPWAVESW",
+"site": "33_BBP",
+"expected": "BBP WAVESW"
+},
+{
+"ap_name": "DLBBP2BBPOffice",
+"site": "33_BBP",
+"expected": null
+},
+{
+"ap_name": "BOTBHSN2JJ",
+"site": "34_SN",
+"expected": null
+},
+{
+"ap_name": "BOTSECSNNE",
+"site": "34_SN",
+"expected": "SN NE"
+},
+{
+"ap_name": "BOTSECSNNW",
+"site": "34_SN",
+"expected": "SN NW"
+},
+{
+"ap_name": "BOTSECSNSE",
+"site": "34_SN",
+"expected": "SN SE"
+},
+{
+"ap_name": "BOTSECSNSW",
+"site": "34_SN",
+"expected": "SN SW"
+},
+{
+"ap_name": "BOTBHDAW2BS",
+"site": "35_DAW",
+"expected": null
+},
+{
+"ap_name": "BOTBHDAW2JM",
+"site": "35_DAW",
+"expected": null
+},
+{
+"ap_name": "BOTDLDAW2PH",
+"site": "35_DAW",
+"expected": null
+},
+{
+"ap_name": "BOTSECDAWNE",
+"site": "35_DAW",
+"expected": "DAW NE"
+},
+{
+"ap_name": "BOTSECDAWNW",
+"site": "35_DAW",
+"expected": "DAW NW"
+},
+{
+"ap_name": "BOTSECDAWSE",
+"site": "35_DAW",
+"expected": "DAW SE"
+},
+{
+"ap_name": "BOTSECDAWSW",
+"site": "35_DAW",
+"expected": "DAW SW"
+},
+{
+"ap_name": "BOTSECEB-LOCAL-AP",
+"site": "36_EB",
+"expected": "EB LOCAL-AP"
+},
+{
+"ap_name": "BOTSECEBN",
+"site": "36_EB",
+"expected": "EB N"
+},
+{
+"ap_name": "BOTSECEBSE",
+"site": "36_EB",
+"expected": "EB SE"
+},
+{
+"ap_name": "BOTSECEBSW",
+"site": "36_EB",
+"expected": "EB SW"
+},
+{
+"ap_name": "BOTBHMIN2PF",
+"site": "37_Min",
+"expected": null
+},
+{
+"ap_name": "BOTBHMIN2SF",
+"site": "37_Min",
+"expected": null
+},
+{
+"ap_name": "BOTSECMINS",
+"site": "37_Min",
+"expected": "MIN S"
+},
+{
+"ap_name": "BOTSECMINW",
+"site": "37_Min",
+"expected": "MIN W"
+},
+{
+"ap_name": "BOTSECMINWAVESE",
+"site": "37_Min",
+"expected": "MIN WAVESE"
+},
+{
+"ap_name": "BOTBHJKR2FRN",
+"site": "40_JKR",
+"expected": null
+},
+{
+"ap_name": "BOTBHJKR2GCM",
+"site": "40_JKR",
+"expected": null
+},
+{
+"ap_name": "BOTBHJKR2MBT",
+"site": "40_JKR",
+"expected": null
+},
+{
+"ap_name": "BOTSECJKRE",
+"site": "40_JKR",
+"expected": "JKR E"
+},
+{
+"ap_name": "BOTSECJKRN",
+"site": "40_JKR",
+"expected": "JKR N"
+},
+{
+"ap_name": "BOTSECJKRS",
+"site": "40_JKR",
+"expected": "JKR S"
+},
+{
+"ap_name": "BOTSECJKRW",
+"site": "40_JKR",
+"expected": "JKR W"
+},
+{
+"ap_name": "BOTBHJHN2GCM",
+"site": "41_JHN",
+"expected": null
+},
+{
+"ap_name": "BOTBHJHN2JON",
+"site": "41_JHN",
+"expected": null
+},
+{
+"ap_name": "BOTSECJHNE",
+"site": "41_JHN",
+"expected": "JHN E"
+},
+{
+"ap_name": "BOTSECJHNN",
+"site": "41_JHN",
+"expected": "JHN N"
+},
+{
+"ap_name": "BOTSECJHNS",
+"site": "41_JHN",
+"expected": "JHN S"
+},
+{
+"ap_name": "BOTSECJHNW",
+"site": "41_JHN",
+"expected": "JHN W"
+},
+{
+"ap_name": "BOTSECJONN",
+"site": "42_JON",
+"expected": "JON N"
+},
+{
+"ap_name": "BOTSECJONNE",
+"site": "42_JON",
+"expected": "JON NE"
+},
+{
+"ap_name": "BOTSECJONNW",
+"site": "42_JON",
+"expected": "JON NW"
+},
+{
+"ap_name": "BOTSECJONS",
+"site": "42_JON",
+"expected": "JON S"
+},
+{
+"ap_name": "Onken_Local",
+"site": "42_JON",
+"expected": null
+},
+{
+"ap_name": "BOTBHBPS2FRN",
+"site": "43_BPS",
+"expected": null
+},
+{
+"ap_name": "BOTBHBPS2JON",
+"site": "43_BPS",
+"expected": null
+},
+{
+"ap_name": "BOTBHBPS2JSG",
+"site": "43_BPS",
+"expected": null
+},
+{
+"ap_name": "BOTSECBPSEE",
+"site": "43_BPS",
+"expected": "BPS EE"
+},
+{
+"ap_name": "BOTSECBPSENE",
+"site": "43_BPS",
+"expected": "BPS ENE"
+},
+{
+"ap_name": "BOTSECBPSN",
+"site": "43_BPS",
+"expected": "BPS N"
+},
+{
+"ap_name": "BOTSECBPSS",
+"site": "43_BPS",
+"expected": "BPS S"
+},
+{
+"ap_name": "BOTSECBPSW",
+"site": "43_BPS",
+"expected": "BPS W"
+},
+{
+"ap_name": "BPS Fiber Feed AP",
+"site": "43_BPS",
+"expected": null
+},
+{
+"ap_name": "BOTSECBSSW",
+"site": "44_BS",
+"expected": "BS SW"
+},
+{
+"ap_name": "BOTSECGCM045",
+"site": "45_GCM",
+"expected": "GCM 045"
+},
+{
+"ap_name": "BOTSECGCM165",
+"site": "45_GCM",
+"expected": "GCM 165"
+},
+{
+"ap_name": "BOTSECGCM210",
+"site": "45_GCM",
+"expected": "GCM 210"
+},
+{
+"ap_name": "BOTSECGCM330",
+"site": "45_GCM",
+"expected": "GCM 330"
+},
+{
+"ap_name": "BOTSECGCMW",
+"site": "45_GCM",
+"expected": "GCM W"
+},
+{
+"ap_name": "BOTBHJGH2BS",
+"site": "47_JGH",
+"expected": null
+},
+{
+"ap_name": "BOTBHJGH2PCC",
+"site": "47_JGH",
+"expected": null
+},
+{
+"ap_name": "BOTSECJGHE",
+"site": "47_JGH",
+"expected": "JGH E"
+},
+{
+"ap_name": "BOTSECJGHN",
+"site": "47_JGH",
+"expected": "JGH N"
+},
+{
+"ap_name": "BOTSECJGHS",
+"site": "47_JGH",
+"expected": "JGH S"
+},
+{
+"ap_name": "BOTSECJGHWAVEESE",
+"site": "47_JGH",
+"expected": "JGH WAVEESE"
+},
+{
+"ap_name": "BOTSECJGHWAVEN",
+"site": "47_JGH",
+"expected": "JGH WAVEN"
+},
+{
+"ap_name": "BOTSECJGHWAVEWSW",
+"site": "47_JGH",
+"expected": "JGH WAVEWSW"
+},
+{
+"ap_name": "JGH_Local_AP",
+"site": "47_JGH",
+"expected": "JGH LOCAL-AP"
+},
+{
+"ap_name": "BOTBHJJ2EB",
+"site": "49_JJ",
+"expected": null
+},
+{
+"ap_name": "BOTSECJJE",
+"site": "49_JJ",
+"expected": "JJ E"
+},
+{
+"ap_name": "BOTSECJJN",
+"site": "49_JJ",
+"expected": "JJ N"
+},
+{
+"ap_name": "BOTSECJJS",
+"site": "49_JJ",
+"expected": "JJ S"
+},
+{
+"ap_name": "BOTSECJJW",
+"site": "49_JJ",
+"expected": "JJ W"
+},
+{
+"ap_name": "JJLocalHopAP",
+"site": "49_JJ",
+"expected": "JJ LOCALHOPAP"
+},
+{
+"ap_name": "BOTBHFRN2FFF",
+"site": "50_FRN",
+"expected": null
+},
+{
+"ap_name": "BOTSECFRNE",
+"site": "50_FRN",
+"expected": "FRN E"
+},
+{
+"ap_name": "BOTSECFRNN",
+"site": "50_FRN",
+"expected": "FRN N"
+},
+{
+"ap_name": "BOTSECFRNNELP",
+"site": "50_FRN",
+"expected": "FRN NELP"
+},
+{
+"ap_name": "BOTSECFRNW",
+"site": "50_FRN",
+"expected": "FRN W"
+},
+{
+"ap_name": "BOTBHTC2BW",
+"site": "52_TC",
+"expected": null
+},
+{
+"ap_name": "BOTBHTC2HOY",
+"site": "52_TC",
+"expected": null
+},
+{
+"ap_name": "BOTSECTCE",
+"site": "52_TC",
+"expected": "TC E"
+},
+{
+"ap_name": "BOTSECTCN",
+"site": "52_TC",
+"expected": "TC N"
+},
+{
+"ap_name": "BOTSECTCS",
+"site": "52_TC",
+"expected": "TC S"
+},
+{
+"ap_name": "BOTSECTCW",
+"site": "52_TC",
+"expected": "TC W"
+},
+{
+"ap_name": "BOTBHSC2LG",
+"site": "53_SC",
+"expected": null
+},
+{
+"ap_name": "BOTBHSC2RG",
+"site": "53_SC",
+"expected": null
+},
+{
+"ap_name": "BOTSECSCN",
+"site": "53_SC",
+"expected": "SC N"
+},
+{
+"ap_name": "BOTSECSCS",
+"site": "53_SC",
+"expected": "SC S"
+},
+{
+"ap_name": "BOTSECSCW",
+"site": "53_SC",
+"expected": "SC W"
+},
+{
+"ap_name": "BOTSECJME",
+"site": "54_JM",
+"expected": "JM E"
+},
+{
+"ap_name": "BOTSECJMLlocal",
+"site": "54_JM",
+"expected": "JM LLOCAL"
+},
+{
+"ap_name": "BOTSECJMN",
+"site": "54_JM",
+"expected": "JM N"
+},
+{
+"ap_name": "BOTSECJMW",
+"site": "54_JM",
+"expected": "JM W"
+},
+{
+"ap_name": "MashJHopShop-AP-Loc",
+"site": "54_JM",
+"expected": null
+},
+{
+"ap_name": "BOTSECRGE",
+"site": "55_RG",
+"expected": "RG E"
+},
+{
+"ap_name": "BOTSECRGN",
+"site": "55_RG",
+"expected": "RG N"
+},
+{
+"ap_name": "BOTBHMNG2CHS",
+"site": "57_MNG",
+"expected": null
+},
+{
+"ap_name": "BOTSECMNGSW",
+"site": "57_MNG",
+"expected": "MNG SW"
+},
+{
+"ap_name": "BOTSECCHSN",
+"site": "58_CHS",
+"expected": "CHS N"
+},
+{
+"ap_name": "BOTSECCHSW",
+"site": "58_CHS",
+"expected": "CHS W"
+},
+{
+"ap_name": "BOTBHCG2RG",
+"site": "59_CG",
+"expected": null
+},
+{
+"ap_name": "BOTSECCGSW2",
+"site": "59_CG",
+"expected": "CG SW2"
+},
+{
+"ap_name": "CG-Local-AP",
+"site": "59_CG",
+"expected": "CG LOCAL-AP"
+},
+{
+"ap_name": "BOTBHCT2BBP",
+"site": "60_CT",
+"expected": null
+},
+{
+"ap_name": "BOTBHCT2EWT",
+"site": "60_CT",
+"expected": null
+},
+{
+"ap_name": "BOTBHCT2JJ",
+"site": "60_CT",
+"expected": null
+},
+{
+"ap_name": "BOTSECCTE",
+"site": "60_CT",
+"expected": "CT E"
+},
+{
+"ap_name": "BOTSECCTW",
+"site": "60_CT",
+"expected": "CT W"
+},
+{
+"ap_name": "BOTSECNDLN",
+"site": "62_NDL",
+"expected": "NDL N"
+},
+{
+"ap_name": "BOTBHJSG2MNG",
+"site": "63_JSG",
+"expected": null
+},
+{
+"ap_name": "BOTSECJSGLOCAL",
+"site": "63_JSG",
+"expected": "JSG LOCAL"
+},
+{
+"ap_name": "BOTSECJSGNE",
+"site": "63_JSG",
+"expected": "JSG NE"
+},
+{
+"ap_name": "BOTSECJSGSE",
+"site": "63_JSG",
+"expected": "JSG SE"
+},
+{
+"ap_name": "BOTSECJSGSW",
+"site": "63_JSG",
+"expected": "JSG SW"
+},
+{
+"ap_name": "BOTBHFFF2FRN2",
+"site": "65_FFF",
+"expected": null
+},
+{
+"ap_name": "BOTSECHOYE",
+"site": "67_HOY",
+"expected": "HOY E"
+},
+{
+"ap_name": "HOY_Hop-AP",
+"site": "67_HOY",
+"expected": "HOY HOP-AP"
+},
+{
+"ap_name": "BOTBHCIB2RG",
+"site": "68_CIB",
+"expected": null
+},
+{
+"ap_name": "BOTBHCIB2SC",
+"site": "68_CIB",
+"expected": null
+},
+{
+"ap_name": "BOTSECCIBE",
+"site": "68_CIB",
+"expected": "CIB E"
+},
+{
+"ap_name": "BOTSECCIBLOCAL",
+"site": "68_CIB",
+"expected": "CIB LOCAL"
+},
+{
+"ap_name": "BOTSECCIBN",
+"site": "68_CIB",
+"expected": "CIB N"
+},
+{
+"ap_name": "BOTSECCIBN2",
+"site": "68_CIB",
+"expected": "CIB N2"
+},
+{
+"ap_name": "BOTSECCIBW",
+"site": "68_CIB",
+"expected": "CIB W"
+},
+{
+"ap_name": "BOTBHSHA2MK",
+"site": "69_SHA",
+"expected": null
+},
+{
+"ap_name": "BOTBHSHA2THORPE",
+"site": "69_SHA",
+"expected": null
+},
+{
+"ap_name": "BOTDLSHA2Ballard",
+"site": "69_SHA",
+"expected": null
+},
+{
+"ap_name": "BOTSECSHAE",
+"site": "69_SHA",
+"expected": "SHA E"
+},
+{
+"ap_name": "BOTSECSHAN",
+"site": "69_SHA",
+"expected": "SHA N"
+},
+{
+"ap_name": "BOTSECSHAW",
+"site": "69_SHA",
+"expected": "SHA W"
+},
+{
+"ap_name": "BOTSECEWT060",
+"site": "70_EWT",
+"expected": "EWT 060"
+},
+{
+"ap_name": "BOTSECEWT120",
+"site": "70_EWT",
+"expected": "EWT 120"
+},
+{
+"ap_name": "BOTSECEWT180",
+"site": "70_EWT",
+"expected": "EWT 180"
+},
+{
+"ap_name": "BOTSECEWT300",
+"site": "70_EWT",
+"expected": "EWT 300"
+},
+{
+"ap_name": "BOTSECEWT360",
+"site": "70_EWT",
+"expected": "EWT 360"
+},
+{
+"ap_name": "BOTSECEWTWAVEN",
+"site": "70_EWT",
+"expected": "EWT WAVEN"
+},
+{
+"ap_name": "BOTSECEWTWAVES",
+"site": "70_EWT",
+"expected": "EWT WAVES"
+},
+{
+"ap_name": "BTOBHEWT2DEX",
+"site": "70_EWT",
+"expected": null
+},
+{
+"ap_name": "BOTBHDEX2SN",
+"site": "71_DEX",
+"expected": null
+},
+{
+"ap_name": "BOTSECDEXE",
+"site": "71_DEX",
+"expected": "DEX E"
+},
+{
+"ap_name": "BOTSECDEXN",
+"site": "71_DEX",
+"expected": "DEX N"
+},
+{
+"ap_name": "BOTSECDEXS",
+"site": "71_DEX",
+"expected": "DEX S"
+},
+{
+"ap_name": "BOTSECDEXW",
+"site": "71_DEX",
+"expected": "DEX W"
+},
+{
+"ap_name": "BOTBHVM2I35",
+"site": "72_VM",
+"expected": null
+},
+{
+"ap_name": "BOTSECVME",
+"site": "72_VM",
+"expected": "VM E"
+},
+{
+"ap_name": "BOTSECVMN",
+"site": "72_VM",
+"expected": "VM N"
+},
+{
+"ap_name": "BOTSECVMNW",
+"site": "72_VM",
+"expected": "VM NW"
+},
+{
+"ap_name": "BOTSECVMS",
+"site": "72_VM",
+"expected": "VM S"
+},
+{
+"ap_name": "BOTSECVMW",
+"site": "72_VM",
+"expected": "VM W"
+},
+{
+"ap_name": "BOTBHI352SH",
+"site": "74_I-35",
+"expected": null
+},
+{
+"ap_name": "BOTBHI352SR",
+"site": "74_I-35",
+"expected": null
+},
+{
+"ap_name": "BOTBHI352TDV",
+"site": "74_I-35",
+"expected": null
+},
+{
+"ap_name": "BOTSECI35NE",
+"site": "74_I-35",
+"expected": "I35 NE"
+},
+{
+"ap_name": "BOTSECI35NW",
+"site": "74_I-35",
+"expected": "I35 NW"
+},
+{
+"ap_name": "BOTSECI35SE",
+"site": "74_I-35",
+"expected": "I35 SE"
+},
+{
+"ap_name": "BOTSECI35SW",
+"site": "74_I-35",
+"expected": "I35 SW"
+},
+{
+"ap_name": "BOTSECI35W",
+"site": "74_I-35",
+"expected": "I35 W"
+},
+{
+"ap_name": "BOTBHSH2G50",
+"site": "76_SH",
+"expected": null
+},
+{
+"ap_name": "BOTSECSH160",
+"site": "76_SH",
+"expected": "SH 160"
+},
+{
+"ap_name": "BOTSECSH2.4NE",
+"site": "76_SH",
+"expected": "SH 2.4NE"
+},
+{
+"ap_name": "BOTSECSH240",
+"site": "76_SH",
+"expected": "SH 240"
+},
+{
+"ap_name": "BOTSECSHELP",
+"site": "76_SH",
+"expected": "SH ELP"
+},
+{
+"ap_name": "BOTSECSHNE",
+"site": "76_SH",
+"expected": "SH NE"
+},
+{
+"ap_name": "BOTSECSHNW",
+"site": "76_SH",
+"expected": "SH NW"
+},
+{
+"ap_name": "BOTSECSHSE",
+"site": "76_SH",
+"expected": "SH SE"
+},
+{
+"ap_name": "BOTSECSHSSELP",
+"site": "76_SH",
+"expected": "SH SSELP"
+},
+{
+"ap_name": "BOTSECSHSSWLP",
+"site": "76_SH",
+"expected": "SH SSWLP"
+},
+{
+"ap_name": "BOTSECSHSW",
+"site": "76_SH",
+"expected": "SH SW"
+},
+{
+"ap_name": "BOTSECSHWAVES",
+"site": "76_SH",
+"expected": "SH WAVES"
+},
+{
+"ap_name": "BOTBHAHQ2KH",
+"site": "AHQ",
+"expected": null
+},
+{
+"ap_name": "BOTBHAHQ2SH",
+"site": "AHQ",
+"expected": null
+},
+{
+"ap_name": "BOTSECAHQE",
+"site": "AHQ",
+"expected": "AHQ E"
+},
+{
+"ap_name": "BOTSECAHQN",
+"site": "AHQ",
+"expected": "AHQ N"
+},
+{
+"ap_name": "BOTSECAHQS",
+"site": "AHQ",
+"expected": "AHQ S"
+},
+{
+"ap_name": "BOTSECAHQW",
+"site": "AHQ",
+"expected": "AHQ W"
+},
+{
+"ap_name": "BOTSECAHQWNW",
+"site": "AHQ",
+"expected": "AHQ WNW"
+},
+{
+"ap_name": "Brink Hop Ap",
+"site": "Brink-Woodward, Brian/Brenda",
+"expected": null
+},
+{
+"ap_name": "BrownMatt-Hop-AP",
+"site": "Brown, Caryn",
+"expected": null
+},
+{
+"ap_name": "SB_North_HopAP",
+"site": "Bryan Grain Leg, Shannon",
+"expected": null
+},
+{
+"ap_name": "Admin N TAP",
+"site": "CIE Office Pole",
+"expected": null
+},
+{
+"ap_name": "BOTBHG502BBP",
+"site": "G50",
+"expected": null
+},
+{
+"ap_name": "BOTBHG502VM",
+"site": "G50",
+"expected": null
+},
+{
+"ap_name": "BOTSECG50E",
+"site": "G50",
+"expected": "G50 E"
+},
+{
+"ap_name": "BOTSECG50N",
+"site": "G50",
+"expected": "G50 N"
+},
+{
+"ap_name": "BOTSECG50S",
+"site": "G50",
+"expected": "G50 S"
+},
+{
+"ap_name": "BOTSECG50W",
+"site": "G50",
+"expected": "G50 W"
+},
+{
+"ap_name": "BOTSECGJCWAVEN",
+"site": "GJC 81",
+"expected": "GJC WAVEN"
+},
+{
+"ap_name": "Henricksen Hop AP",
+"site": "Henricksen, John",
+"expected": null
+},
+{
+"ap_name": "AgInputsHop_AP",
+"site": "Inputs Inc, Ag",
+"expected": null
+},
+{
+"ap_name": "Kenoyer-Local-Hop-AP",
+"site": "Kenoyer, Everett",
+"expected": null
+},
+{
+"ap_name": "KnudsonHopAP",
+"site": "Knudson, Domar",
+"expected": null
+},
+{
+"ap_name": "Lynch-Hop-AP",
+"site": "Lynch, Dan",
+"expected": null
+},
+{
+"ap_name": "Molln-Hop-AP",
+"site": "Molln, Lary",
+"expected": null
+},
+{
+"ap_name": "Local_Hop_AP",
+"site": "Morris, James",
+"expected": null
+},
+{
+"ap_name": "BOTDLIOE2AHQ",
+"site": "Operating Engr's, Iowa",
+"expected": null
+},
+{
+"ap_name": "BOTSECRLMP2MP",
+"site": "RLMP",
+"expected": "RLMP 2MP"
+},
+{
+"ap_name": "RichCollegeAP",
+"site": "RichCollegeAP",
+"expected": null
+},
+{
+"ap_name": "BOTBHSF2NDL",
+"site": "SF",
+"expected": null
+},
+{
+"ap_name": "BOTBHSF2NL_WAVE",
+"site": "SF",
+"expected": null
+},
+{
+"ap_name": "BOTSECSF2.4N",
+"site": "SF",
+"expected": "SF 2.4N"
+},
+{
+"ap_name": "BOTSECSFNE",
+"site": "SF",
+"expected": "SF NE"
+},
+{
+"ap_name": "BOTSECSFSE",
+"site": "SF",
+"expected": "SF SE"
+},
+{
+"ap_name": "BOTSECSFW",
+"site": "SF",
+"expected": "SF W"
+},
+{
+"ap_name": "Starmer-Shop-Hop",
+"site": "Starmer, Tim",
+"expected": null
+},
+{
+"ap_name": "BOTSECTDVSE",
+"site": "TDV",
+"expected": "TDV SE"
+}
+]
+}
