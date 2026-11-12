@@ -9,7 +9,7 @@ runs through /bin/sh with /tmp/system.cfg, cfgmtd and /usr/etc/rc.d/rc.softresta
 to a temp folder, so the service's real shell commands (the s() function, sed, cfgmtd,
 softrestart) are exercised end to end. Records commands in FakeAirOSSSH.commands.
 """
-import http.server, json, os, socket, ssl, subprocess, tempfile, threading, urllib.parse
+import http.server, json, os, socket, ssl, subprocess, tempfile, threading, time, urllib.parse
 
 
 class FakeAirOS:
@@ -91,13 +91,19 @@ _HOST_KEY = None
 
 class FakeAirOSSSH:
     def __init__(self, cfg=SAMPLE_CFG, username="BTTW", password="sshpass", host="127.0.0.1", port=0,
-                 sabotage_key=None, drop_on_restart=False, save_exit=0, restart_exit=0):
+                 sabotage_key=None, drop_on_restart=False, save_exit=0, restart_exit=0,
+                 command_delay=0, drop_backup=False, host_key=None):
         import paramiko
         global _HOST_KEY
-        if _HOST_KEY is None:
-            _HOST_KEY = paramiko.RSAKey.generate(2048)
+        if host_key is not None:
+            self.host_key = host_key
+        else:
+            if _HOST_KEY is None:
+                _HOST_KEY = paramiko.RSAKey.generate(2048)
+            self.host_key = _HOST_KEY
         self.username, self.password = username, password
         self.sabotage_key, self.drop_on_restart = sabotage_key, drop_on_restart
+        self.command_delay, self.drop_backup = command_delay, drop_backup
         self.save_exit, self.restart_exit = save_exit, restart_exit
         self.commands, self.logins = [], 0
         self.dir = tempfile.mkdtemp(prefix="fake-airos-ssh-")
@@ -162,15 +168,21 @@ class FakeAirOSSSH:
             except OSError:
                 return
             t = paramiko.Transport(conn)
-            t.add_server_key(_HOST_KEY)
+            t.add_server_key(self.host_key)
             self.transports.append(t)
             try:
                 t.start_server(server=self._server_cls())
             except Exception:
                 continue
 
+    def rotate_host_key(self):
+        import paramiko
+        self.host_key = paramiko.RSAKey.generate(2048)
+
     def _exec(self, channel, command):
         self.commands.append(command)
+        if self.command_delay:
+            time.sleep(self.command_delay)
         is_restart = "rc.softrestart" in command
         if is_restart:
             self.restarts += 1
@@ -178,15 +190,23 @@ class FakeAirOSSSH:
                  .replace("cfgmtd ", os.path.join(self.bindir, "cfgmtd") + " ")
                  .replace("/tmp/system.cfg", self.cfg_path))
         p = subprocess.run(["sh", "-c", local], capture_output=True, text=True, timeout=20)
-        if self.sabotage_key and "sed -i" in command:
+        if self.sabotage_key and "btwi-cfg-edit" in command:
             self.set_key(self.sabotage_key, "sabotaged")
+        if self.drop_backup and "btwi-cfg-edit" in command:
+            bak = self.cfg_path + ".rename-bak"
+            if os.path.exists(bak):
+                os.remove(bak)
         if is_restart and self.drop_on_restart:
             channel.get_transport().close()  # session dies mid soft restart, no exit status
             return
-        channel.sendall((p.stdout + p.stderr).encode())
-        channel.send_exit_status(p.returncode)
-        channel.shutdown_write()
-        channel.close()
+        try:
+            channel.sendall((p.stdout + p.stderr).encode())
+            channel.send_exit_status(p.returncode)
+            channel.shutdown_write()
+            channel.close()
+        except OSError:
+            # The client already gave up (time budget or a closed session).
+            pass
 
     # helpers for tests
     def cfg(self):

@@ -19,6 +19,9 @@ Endpoints
                 it again after. Fields: ip, name, optional snmp_location, uisp_device_id or mac
                 (to derive the location from UISP), dry_run, workflow_id.
                 There is no IP allowlist. The supplied address is the only SSH target.
+                Loopback, link-local, multicast, reserved, unspecified, and 0.x are rejected.
+                Host keys default to reject. RADIO_SSH_HOST_KEY_POLICY=accept-new is the
+                less secure opt-in: save the first key, then reject a changed key.
   GET  /health  no auth, no radio contact
 
 Auth: "secret" field in the body (Vision), or X-Webhook-Secret header, or
@@ -97,24 +100,31 @@ class Settings:
         self.radio_ssh_user = env.get("RADIO_SSH_USER", "BTTW")
         self.radio_ssh_password = env.get("RADIO_SSH_PASSWORD", "")
         self.radio_ssh_known_hosts = env.get("RADIO_SSH_KNOWN_HOSTS", "")
+        # reject (default): do not send the password unless the key is pinned.
+        # accept-new: save the first key, then reject a different one. Less secure.
+        self.radio_ssh_host_key_policy = env.get("RADIO_SSH_HOST_KEY_POLICY", "reject").strip().lower() or "reject"
         self.radio_ssh_connect_timeout = float(env.get("RADIO_SSH_CONNECT_TIMEOUT", "8"))
         self.radio_ssh_command_timeout = float(env.get("RADIO_SSH_COMMAND_TIMEOUT", "20"))
         self.cpe_softrestart_timeout = float(env.get("CPE_SOFTRESTART_TIMEOUT", "45"))
+        # Whole /rename-cpe attempt (UISP + SSH). Stays under nginx's 90s proxy_read_timeout.
+        self.rename_time_budget = float(env.get("RENAME_TIME_BUDGET_SECONDS", "75"))
         # /rename-cpe has no IP allowlist. It SSHes only to the one address in the request.
         self.cpe_snmp_community = env.get("CPE_SNMP_COMMUNITY", "BTWI")
         self.cpe_snmp_contact = env.get("CPE_SNMP_CONTACT", "BTWI")
+        # Blank is allowed at startup so /kick can run. /rename-cpe checks it per call.
         self.cpe_syslog_ip = env.get("CPE_SYSLOG_IP", "10.55.12.244")
         self.cpe_syslog_port = env.get("CPE_SYSLOG_PORT", "514")
         self.uisp_base_url = env.get("UISP_BASE_URL", "https://uisp.btwi.net/nms/api/v2.1").rstrip("/")
         self.uisp_api_token = env.get("UISP_API_TOKEN", "")
         self.uisp_timeout = float(env.get("UISP_TIMEOUT", "30"))
         for k, v in (("CPE_SNMP_COMMUNITY", self.cpe_snmp_community), ("CPE_SNMP_CONTACT", self.cpe_snmp_contact),
-                     ("CPE_SYSLOG_IP", self.cpe_syslog_ip), ("CPE_SYSLOG_PORT", self.cpe_syslog_port)):
+                     ("CPE_SYSLOG_PORT", self.cpe_syslog_port)):
             if not v or any(c in v for c in "|&\\'\"`\n\r"):
                 raise RuntimeError(f"{k} is empty or contains characters that are not allowed")
-        ipaddress.ip_address(self.cpe_syslog_ip)
         if not self.cpe_syslog_port.isdigit():
             raise RuntimeError("CPE_SYSLOG_PORT must be a number")
+        if self.radio_ssh_host_key_policy not in ("reject", "accept-new"):
+            raise RuntimeError("RADIO_SSH_HOST_KEY_POLICY must be reject or accept-new")
         missing = [k for k, v in (("WEBHOOK_SECRET", self.webhook_secret),
                                   ("RADIO_USERNAME", self.radio_username),
                                   ("RADIO_PASSWORD", self.radio_password)) if not v]
@@ -202,11 +212,31 @@ def norm_ip(value: Any, networks: list | None = None) -> str:
     return str(ip)
 
 
+_ZERO_NET = ipaddress.ip_network("0.0.0.0/8")
+
+
+def unacceptable_rename_ip(ip: ipaddress.IPv4Address) -> str | None:
+    """Why this address must not be an SSH target, or None when it may be."""
+    if ip.is_unspecified or ip in _ZERO_NET:
+        return "an unspecified or 0.x address"
+    if ip.is_loopback:
+        return "a loopback address"
+    if ip.is_link_local:
+        return "a link-local address"
+    if ip.is_multicast:
+        return "a multicast address"
+    if ip.is_reserved:
+        return "a reserved address"
+    return None
+
+
 def norm_rename_ip(value: Any) -> str:
     """The one IPv4 address /rename-cpe may SSH to.
 
     No allowlist and no fallback to ALLOWED_NETWORKS. A prefix, a list, or anything
     that is not a single IP is rejected here, before any socket is opened.
+    Loopback, link-local, multicast, reserved, unspecified, and 0.x addresses are
+    rejected too: 0.0.0.0 and 127.0.0.1 would SSH back into this server.
     """
     raw = str(value or "").strip()
     if not raw:
@@ -217,8 +247,11 @@ def norm_rename_ip(value: Any) -> str:
         ip = ipaddress.ip_address(raw)
     except ValueError:
         raise ValueError(f"ip '{raw[:45]}' is not a valid IP address")
-    if ip.version != 4:
+    if not isinstance(ip, ipaddress.IPv4Address):
         raise ValueError("ip must be IPv4")
+    reason = unacceptable_rename_ip(ip)
+    if reason:
+        raise ValueError(f"ip {ip} is {reason} and cannot be used")
     return str(ip)
 
 
@@ -341,7 +374,38 @@ def airos_kick(ap_ip: str, mac: str, iface: str) -> str:
 # shell function below, then `cfgmtd -w -p /etc/ && /usr/etc/rc.d/rc.softrestart save`.
 CPE_CFG = "/tmp/system.cfg"
 CPE_CFG_BAK = "/tmp/system.cfg.rename-bak"
-SET_FN = 'F=/tmp/system.cfg; s(){ grep -q "^$1=" $F && sed -i "s|^$1=.*|$1=$2|" $F || echo "$1=$2" >> $F; }'
+# Exact line edit. `case` matches the key literally, so a dot is not a wildcard.
+# The marker btwi-cfg-edit is how tests recognize an edit. Backup is a temp file
+# then mv, which is atomic on the same filesystem.
+SET_FN = '''F=/tmp/system.cfg
+# btwi-cfg-edit
+s() {
+  key=$1
+  val=$2
+  tmp=$F.edit.tmp
+  found=0
+  : > "$tmp"
+  cr=$(printf '\\r')
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%"$cr"}
+    case "$line" in
+      "$key"=*)
+        if [ "$found" -eq 0 ]; then
+          printf '%s=%s\\n' "$key" "$val" >> "$tmp"
+          found=1
+        fi
+        ;;
+      *)
+        printf '%s\\n' "$line" >> "$tmp"
+        ;;
+    esac
+  done < "$F"
+  if [ "$found" -eq 0 ]; then
+    printf '%s=%s\\n' "$key" "$val" >> "$tmp"
+  fi
+  mv "$tmp" "$F"
+}
+'''
 SAVE_CMD = "cfgmtd -w -p /etc/"
 APPLY_CMD = "/usr/etc/rc.d/rc.softrestart save"
 # Harmless noise printed by rc.softrestart / cfgmtd on airOS 8
@@ -442,21 +506,39 @@ def derive_location(ap_name: str, site_name: str) -> tuple[str | None, str]:
     return f"{tower} {sector}", f"from AP {name} (site {site_name})"
 
 
-def _uisp_get(path: str) -> Any:
+def _uisp_get(path: str, budget: "TimeBudget | None" = None) -> Any:
+    """GET one UISP path. Redirects are errors so the x-auth-token is not forwarded."""
+    read_timeout = S.uisp_timeout
+    connect_timeout = S.connect_timeout
+    if budget is not None:
+        read_timeout = budget.slice(read_timeout)
+        connect_timeout = min(connect_timeout, read_timeout)
     try:
         r = requests.get(f"{S.uisp_base_url}{path}", headers={"x-auth-token": S.uisp_api_token,
                                                              "accept": "application/json"},
-                         timeout=(S.connect_timeout, S.uisp_timeout))
+                         timeout=(connect_timeout, read_timeout), allow_redirects=False)
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"UISP unreachable ({type(e).__name__})")
+    if r.status_code in (301, 302, 303, 307, 308):
+        raise RuntimeError(
+            f"UISP {path.split('?')[0]} returned HTTP {r.status_code} redirect; not followed")
     if r.status_code != 200:
         raise RuntimeError(f"UISP {path.split('?')[0]} returned HTTP {r.status_code}")
     return r.json()
 
 
-def uisp_location(ip: str, device_id: str | None, mac: str | None) -> dict:
+def _device_ips(dev: dict) -> set[str]:
+    ips = {str(dev.get("ipAddress") or "").split("/")[0]}
+    ips |= {str(x).split("/")[0] for x in (dev.get("ipAddressList") or [])}
+    return {ip for ip in ips if ip}
+
+
+def uisp_location(ip: str, device_id: str | None, mac: str | None, budget: "TimeBudget | None" = None) -> dict:
     """Look up the CPE in UISP (read-only GETs) and derive TOWER SECTOR from its AP.
-    Returns {location, source ('uisp_ap'|'none'), warning, ap_name, ap_site}."""
+    Returns {location, source ('uisp_ap'|'none'), warning, ap_name, ap_site}.
+
+    A MAC match is used only when that device's IP is the IP in this call.
+    """
     out = {"location": None, "source": "none", "warning": "", "ap_name": "", "ap_site": ""}
     if not S.uisp_api_token:
         out["warning"] = "UISP_API_TOKEN not set; snmp.location skipped"
@@ -464,16 +546,26 @@ def uisp_location(ip: str, device_id: str | None, mac: str | None) -> dict:
     try:
         dev = None
         if device_id:
-            dev = _uisp_get(f"/devices/{device_id}")
+            dev = _uisp_get(f"/devices/{device_id}", budget)
         else:
-            for d in _uisp_get("/devices?role=station"):
+            mac_ip_mismatch = False
+            for d in _uisp_get("/devices?role=station", budget):
                 ident = d.get("identification") or {}
                 d_mac = (ident.get("mac") or "").lower()
-                d_ips = {str(d.get("ipAddress") or "").split("/")[0]}
-                d_ips |= {str(x).split("/")[0] for x in (d.get("ipAddressList") or [])}
-                if (mac and d_mac == mac) or (not mac and ip in d_ips):
+                d_ips = _device_ips(d)
+                if mac:
+                    if d_mac == mac and ip in d_ips:
+                        dev = d
+                        break
+                    if d_mac == mac and ip not in d_ips:
+                        mac_ip_mismatch = True
+                elif ip in d_ips:
                     dev = d
                     break
+            if dev is None and mac_ip_mismatch:
+                out["warning"] = (f"UISP device for mac {mac} does not use {ip}; "
+                                  "snmp.location skipped")
+                return out
         if not dev:
             out["warning"] = f"CPE not found in UISP by {'mac ' + mac if mac else 'ip ' + ip}; snmp.location skipped"
             return out
@@ -482,7 +574,7 @@ def uisp_location(ip: str, device_id: str | None, mac: str | None) -> dict:
         if not ap.get("id"):
             out["warning"] = "UISP shows no AP for this CPE; snmp.location skipped"
             return out
-        ap_dev = _uisp_get(f"/devices/{ap['id']}")
+        ap_dev = _uisp_get(f"/devices/{ap['id']}", budget)
         out["ap_site"] = ((ap_dev.get("identification") or {}).get("site") or {}).get("name") or ""
     except (RuntimeError, ValueError) as e:
         out["warning"] = f"{e}; snmp.location skipped"
@@ -524,50 +616,190 @@ def cfg_diff(cfg: dict[str, list[str]], targets: dict[str, str]) -> list[str]:
 
 
 def edit_command(changes: dict[str, str]) -> str:
-    parts = [SET_FN, f"cp $F {CPE_CFG_BAK}"]
+    """Backup atomically (temp file, then mv), then edit only if that backup exists."""
+    calls = []
     for k, v in changes.items():
         check_sed_safe(k, v)
-        parts.append(f"s {k} {shlex.quote(v)}")
-    # backup first; only edit if the backup worked
-    return f"{parts[0]}; {parts[1]} && {{ {'; '.join(parts[2:])}; }}"
+        calls.append(f"s {shlex.quote(k)} {shlex.quote(v)}")
+    backup = 'cp "$F" "$F.rename-bak.tmp" && mv "$F.rename-bak.tmp" "$F.rename-bak"'
+    return SET_FN + backup + " && { " + "; ".join(calls) + "; }"
 
 
 class SSHDropped(Exception):
     pass
 
 
-class RadioSSH:
-    """Thin paramiko wrapper. The password is only handed to paramiko, never logged."""
+class TimeBudget:
+    """One deadline for every UISP and SSH step in a single /rename-cpe call."""
 
-    def __init__(self, ip: str):
-        # `ip` is the single address from this call. Nothing else is contacted.
+    def __init__(self, seconds: float):
+        self.seconds = float(seconds)
+        self.deadline = time.monotonic() + self.seconds
+        self.timed_out = False
+
+    def remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+    def message(self) -> str:
+        return (f"Rename timed out after {self.seconds:.0f}s. "
+                "No further save or restart will be started.")
+
+    def slice(self, requested: float) -> float:
+        left = self.remaining()
+        if left <= 0.05:
+            self.timed_out = True
+            raise RenameError(self.message(), 504)
+        return min(float(requested), left)
+
+
+class AcceptNewPolicy(paramiko.MissingHostKeyPolicy):
+    """Save the first key for a host, then rely on the saved key for later calls.
+
+    A changed key raises BadHostKeyException inside connect(), before the password
+    is sent. This is less secure than pinning the key ahead of time.
+    """
+
+    def missing_host_key(self, client, hostname, key):
+        if not client._host_keys_filename:
+            raise paramiko.SSHException("accept-new has nowhere to save the host key")
+        client._host_keys.add(hostname, key.get_name(), key)
+        client.save_host_keys(client._host_keys_filename)
+        try:
+            os.chmod(client._host_keys_filename, 0o600)
+        except OSError:
+            pass
+        log.warning("RADIO_SSH_HOST_KEY_POLICY=accept-new saved a new host key for %s "
+                    "(less secure than a pinned key)", hostname)
+
+
+def syslog_problem() -> str | None:
+    value = (S.cpe_syslog_ip or "").strip()
+    if not value:
+        return "CPE_SYSLOG_IP is not configured"
+    if any(c in value for c in "|&\\'\"`\n\r"):
+        return "CPE_SYSLOG_IP contains characters that are not allowed"
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return "CPE_SYSLOG_IP is not a valid IP address"
+    return None
+
+
+def host_key_config_error() -> str | None:
+    """None when it is safe to connect. Otherwise a message and the password is not sent."""
+    policy = S.radio_ssh_host_key_policy
+    path = (S.radio_ssh_known_hosts or "").strip()
+    if policy not in ("reject", "accept-new"):
+        return "RADIO_SSH_HOST_KEY_POLICY must be reject or accept-new"
+    if not path:
+        if policy == "accept-new":
+            return ("RADIO_SSH_HOST_KEY_POLICY=accept-new needs RADIO_SSH_KNOWN_HOSTS "
+                    "so the first key can be saved. Refusing to send the SSH password.")
+        return ("Refusing to send the SSH password: RADIO_SSH_KNOWN_HOSTS is not set. "
+                "Pin the radio key in that file, or set RADIO_SSH_HOST_KEY_POLICY=accept-new "
+                "to save the first key and then reject a changed key (less secure).")
+    parent = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(parent):
+        return (f"RADIO_SSH_KNOWN_HOSTS directory does not exist ({parent}). "
+                "Refusing to send the SSH password.")
+    if policy == "reject" and not os.path.isfile(path):
+        return (f"RADIO_SSH_KNOWN_HOSTS file is missing ({path}). "
+                "Refusing to send the SSH password.")
+    return None
+
+
+def rename_preflight_error() -> str | None:
+    return syslog_problem() or host_key_config_error()
+
+
+def redact_community(payload: dict) -> dict:
+    """Hide snmp.community values in anything we send back to the caller."""
+    keys = payload.get("keys")
+    entry = keys.get("snmp.community") if isinstance(keys, dict) else None
+    if not isinstance(entry, dict):
+        return payload
+    cloned = dict(payload)
+    cloned_keys = dict(keys)
+    cloned_keys["snmp.community"] = {
+        field: (None if entry.get(field) in (None, "") else "***")
+        for field in ("before", "after", "target")
+    }
+    cloned["keys"] = cloned_keys
+    return cloned
+
+
+class RadioSSH:
+    """Thin paramiko wrapper. The password is only handed to paramiko, never logged.
+
+    The password is not sent unless the host key is pinned, or accept-new has a file
+    to save the first key into. `ip` is the only address this session contacts.
+    """
+
+    def __init__(self, ip: str, budget: TimeBudget):
         self.ip = ip
+        self.budget = budget
         self.client = paramiko.SSHClient()
-        if S.radio_ssh_known_hosts:
-            self.client.load_host_keys(S.radio_ssh_known_hosts)
-            self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        # Ignore ~/.ssh/known_hosts. Only RADIO_SSH_KNOWN_HOSTS counts.
+        self.client._system_host_keys.clear()
+        path = (S.radio_ssh_known_hosts or "").strip()
+        if S.radio_ssh_host_key_policy == "accept-new" and path and not os.path.exists(path):
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+        try:
+            self.client.load_host_keys(path)
+        except OSError as e:
+            raise RenameError(
+                f"RADIO_SSH_KNOWN_HOSTS file could not be read ({path}): {e}. "
+                "Refusing to send the SSH password.",
+                400,
+            )
+        if S.radio_ssh_host_key_policy == "accept-new":
+            self.client.set_missing_host_key_policy(AcceptNewPolicy())
         else:
-            # Blank RADIO_SSH_KNOWN_HOSTS: accept this radio's key the first time we connect.
-            self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     def __enter__(self) -> "RadioSSH":
+        timeout = self.budget.slice(S.radio_ssh_connect_timeout)
         try:
             self.client.connect(self.ip, port=S.radio_ssh_port, username=S.radio_ssh_user,
-                                password=S.radio_ssh_password, timeout=S.radio_ssh_connect_timeout,
-                                banner_timeout=S.radio_ssh_connect_timeout,
-                                auth_timeout=S.radio_ssh_connect_timeout,
+                                password=S.radio_ssh_password, timeout=timeout,
+                                banner_timeout=timeout, auth_timeout=timeout,
                                 look_for_keys=False, allow_agent=False)
+        except RenameError:
+            raise
         except paramiko.AuthenticationException:
             raise RenameError(f"SSH login rejected by {self.ip}:{S.radio_ssh_port}; check RADIO_SSH_USER/RADIO_SSH_PASSWORD")
         except paramiko.BadHostKeyException:
-            raise RenameError(f"SSH host key for {self.ip} does not match RADIO_SSH_KNOWN_HOSTS")
-        except (socket.timeout, TimeoutError):
-            raise RenameError(f"SSH: timed out connecting to {self.ip}:{S.radio_ssh_port}")
-        except (OSError, paramiko.SSHException) as e:
-            raise RenameError(f"SSH: cannot reach {self.ip}:{S.radio_ssh_port} ({type(e).__name__})")
+            raise RenameError(
+                f"SSH host key for {self.ip}:{S.radio_ssh_port} does not match RADIO_SSH_KNOWN_HOSTS. "
+                "The password was not sent.",
+                502,
+            )
+        except paramiko.SSHException as e:
+            if "not found in known_hosts" in str(e):
+                raise RenameError(
+                    f"SSH host key for {self.ip}:{S.radio_ssh_port} was not found in RADIO_SSH_KNOWN_HOSTS. "
+                    f"A line for this port must be [{self.ip}]:{S.radio_ssh_port}, not a bare IP. "
+                    "The password was not sent.",
+                    502,
+                )
+            self._timeout_or_unreachable(e)
+        except (socket.timeout, TimeoutError, OSError) as e:
+            self._timeout_or_unreachable(e)
         return self
 
+    def _timeout_or_unreachable(self, exc: BaseException) -> None:
+        if self.budget.timed_out or self.budget.remaining() <= 0:
+            self.budget.timed_out = True
+            raise RenameError(self.budget.message(), 504)
+        if isinstance(exc, (socket.timeout, TimeoutError)):
+            raise RenameError(f"SSH: timed out connecting to {self.ip}:{S.radio_ssh_port}")
+        raise RenameError(f"SSH: cannot reach {self.ip}:{S.radio_ssh_port} ({type(exc).__name__})")
+
     def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
         try:
             self.client.close()
         except Exception:
@@ -576,12 +808,15 @@ class RadioSSH:
     def run(self, cmd: str, timeout: float) -> tuple[int, str]:
         """Run one command. Returns (exit_status, stdout+stderr). Raises SSHDropped if the
         session dies or times out before an exit status arrives."""
+        timeout = self.budget.slice(timeout)
         try:
             _, stdout, _ = self.client.exec_command(cmd, timeout=timeout, get_pty=False)
             ch = stdout.channel
             ch.set_combine_stderr(True)
             out = stdout.read().decode("utf-8", "replace")
             if not ch.exit_status_ready() and not ch.status_event.wait(timeout):
+                self.budget.timed_out = True
+                self.close()
                 raise SSHDropped("no exit status")
             status = ch.recv_exit_status()
             if status == -1:
@@ -590,6 +825,9 @@ class RadioSSH:
         except SSHDropped:
             raise
         except (socket.timeout, TimeoutError, EOFError, OSError, paramiko.SSHException) as e:
+            if self.budget.remaining() <= 0.2:
+                self.budget.timed_out = True
+                self.close()
             raise SSHDropped(type(e).__name__)
 
 
@@ -597,17 +835,50 @@ def _noise_free(text: str) -> list[str]:
     return [l.strip() for l in text.splitlines() if l.strip() and not BENIGN_LINE_RE.match(l.strip())]
 
 
-def cpe_rename_job(ip: str, name: str, location: str | None, dry_run: bool) -> dict:
+def _restore_working_copy(ip: str, budget: TimeBudget) -> str:
+    """Copy the backup back in a new SSH session and cmp it. Honest if that fails."""
+    if budget.timed_out or budget.remaining() <= 0.2:
+        return ("restore was not attempted because the time budget ran out; "
+                "the working config may still be changed")
+    cmd = (
+        f"test -s {CPE_CFG_BAK} || {{ echo 'backup missing'; exit 2; }}; "
+        f"cp {CPE_CFG_BAK} {CPE_CFG}.restore.tmp && mv {CPE_CFG}.restore.tmp {CPE_CFG} && "
+        f"cmp -s {CPE_CFG_BAK} {CPE_CFG} && echo verified || {{ echo 'checksum mismatch'; exit 3; }}"
+    )
+    try:
+        with RadioSSH(ip, budget) as sh:
+            st, out = sh.run(cmd, S.radio_ssh_command_timeout)
+    except RenameError as e:
+        return f"restore could not be verified ({e})"
+    except SSHDropped as e:
+        return f"restore could not be verified (session dropped: {e})"
+    if st == 0 and "verified" in out:
+        return "working config restored and verified against the backup"
+    detail = " ".join(_noise_free(out))[:200] or f"exit {st}"
+    return f"restore could not be verified ({detail})"
+
+
+def _dropped(ip: str, budget: TimeBudget, what: str, res: dict) -> None:
+    if budget.timed_out or budget.remaining() <= 0:
+        budget.timed_out = True
+        raise RenameError(
+            budget.message() + f" SSH session closed during {what}; save and restart were not started.",
+            504, **res)
+    raise RenameError(f"SSH session to {ip} dropped while {what}; nothing saved", **res)
+
+
+def cpe_rename_job(ip: str, name: str, location: str | None, dry_run: bool, budget: TimeBudget) -> dict:
     """SSH in, read, diff, (edit, verify, save, apply). Returns a result dict; raises RenameError."""
     res: dict = {"saved": False, "applied": False, "apply_confirmed": False, "changed_keys": [],
                  "keys": {}, "state": ""}
     targets = cpe_targets(name, location)
-    with RadioSSH(ip) as sh:
+    bad: list[str] = []
+    with RadioSSH(ip, budget) as sh:
         def read_cfg() -> dict[str, list[str]]:
             try:
                 st, out = sh.run(f"cat {CPE_CFG}", S.radio_ssh_command_timeout)
             except SSHDropped as e:
-                raise RenameError(f"SSH session to {ip} dropped while reading config ({e})")
+                _dropped(ip, budget, f"reading config ({e})", res)
             if st != 0 or "=" not in out:
                 raise RenameError(f"could not read {CPE_CFG} on {ip} (exit {st})")
             return parse_cfg(out)
@@ -622,47 +893,57 @@ def cpe_rename_job(ip: str, name: str, location: str | None, dry_run: bool) -> d
             res["state"] = "dry_run" if dry_run else "already_compliant"
             return res
 
+        edit_note = None
         try:
             st, out = sh.run(edit_command({k: targets[k] for k in changes}), S.radio_ssh_command_timeout)
         except SSHDropped as e:
-            raise RenameError(f"SSH session to {ip} dropped while editing config ({e}); nothing saved")
+            _dropped(ip, budget, f"editing config ({e})", res)
         if st != 0:
-            raise RenameError(f"config edit on {ip} failed (exit {st}): {' | '.join(_noise_free(out))[:200]}; nothing saved")
+            edit_note = (f"config edit on {ip} failed (exit {st}): "
+                         f"{' | '.join(_noise_free(out))[:200]}")
+        else:
+            after = read_cfg()
+            res["keys"] = {k: {"before": b[k], "after": (after.get(k) or [None])[0], "target": targets[k]}
+                           for k in targets}
+            bad = cfg_diff(after, targets)
+        if edit_note or bad:
+            pass
+        else:
+            try:
+                sh.run(f"rm -f {CPE_CFG_BAK}", S.radio_ssh_command_timeout)
+                st, out = sh.run(SAVE_CMD, S.radio_ssh_command_timeout)
+            except SSHDropped as e:
+                if budget.timed_out or budget.remaining() <= 0:
+                    budget.timed_out = True
+                    raise RenameError(budget.message() + " Save was not confirmed.", 504, **res)
+                raise RenameError(f"SSH session to {ip} dropped during cfgmtd save ({e}); save state unknown", **res)
+            if st != 0:
+                raise RenameError(f"cfgmtd save on {ip} failed (exit {st}): {' | '.join(_noise_free(out))[:200]}", **res)
+            res["saved"] = True
 
-        after = read_cfg()
-        res["keys"] = {k: {"before": b[k], "after": (after.get(k) or [None])[0], "target": targets[k]}
-                       for k in targets}
-        bad = cfg_diff(after, targets)
-        if bad:
-            try:  # put the working copy back so a later GUI save can't persist a half edit
-                sh.run(f"cp {CPE_CFG_BAK} {CPE_CFG} && rm -f {CPE_CFG_BAK}", S.radio_ssh_command_timeout)
-            except Exception:
-                pass
-            raise RenameError(f"verify failed on {ip} for {', '.join(bad)}; working config restored, nothing saved",
-                              **res)
-
-        try:
-            sh.run(f"rm -f {CPE_CFG_BAK}", S.radio_ssh_command_timeout)
-            st, out = sh.run(SAVE_CMD, S.radio_ssh_command_timeout)
-        except SSHDropped as e:
-            raise RenameError(f"SSH session to {ip} dropped during cfgmtd save ({e}); save state unknown", **res)
-        if st != 0:
-            raise RenameError(f"cfgmtd save on {ip} failed (exit {st}): {' | '.join(_noise_free(out))[:200]}", **res)
-        res["saved"] = True
-
-        # Soft restart drops the customer link for a few seconds and may drop this SSH session too.
-        try:
-            st, out = sh.run(APPLY_CMD, S.cpe_softrestart_timeout)
-        except SSHDropped:
-            res.update(applied=True, apply_confirmed=False, state="changed",
-                       apply_note="SSH session dropped during soft restart (expected); config is saved")
+            # Soft restart drops the customer link for a few seconds and may drop this SSH session too.
+            try:
+                st, out = sh.run(APPLY_CMD, S.cpe_softrestart_timeout)
+            except SSHDropped:
+                if budget.timed_out:
+                    raise RenameError(
+                        budget.message() + " SSH session closed during soft restart; it was not confirmed.",
+                        504, **res)
+                res.update(applied=True, apply_confirmed=False, state="changed",
+                           apply_note="SSH session dropped during soft restart (expected); config is saved")
+                return res
+            noise = _noise_free(out)
+            if st != 0 and noise:
+                raise RenameError(f"config saved on {ip} but soft restart reported exit {st}: {' | '.join(noise)[:200]}; "
+                                  "it will apply on next reboot", **res)
+            res.update(applied=True, apply_confirmed=True, state="changed")
             return res
-        noise = _noise_free(out)
-        if st != 0 and noise:
-            raise RenameError(f"config saved on {ip} but soft restart reported exit {st}: {' | '.join(noise)[:200]}; "
-                              "it will apply on next reboot", **res)
-        res.update(applied=True, apply_confirmed=True, state="changed")
-        return res
+
+    # The edit session is closed. Restore from the backup on a new session.
+    note = _restore_working_copy(ip, budget)
+    if edit_note:
+        raise RenameError(f"{edit_note}; {note}; nothing saved", **res)
+    raise RenameError(f"verify failed on {ip} for {', '.join(bad)}; {note}; nothing saved", **res)
 
 
 def _busy(ip: str, take: bool) -> bool:
@@ -789,16 +1070,26 @@ async def rename_cpe(request: Request):
         write_log({**entry, "result": "failed", "message": msg})
         return respond(False, msg, wid, 500, name=name, ip=ip)
 
+    preflight = rename_preflight_error()
+    if preflight:
+        write_log({**entry, "result": "failed", "message": preflight})
+        return respond(False, preflight, wid, 400, name=name, ip=ip)
+
     warnings: list[str] = []
     loc_info = {"ap_name": "", "ap_site": ""}
-    if override:
-        location, location_source = override, "override"
-    else:
-        info = await anyio.to_thread.run_sync(uisp_location, ip, dev_id, mac)
-        location, location_source = info["location"], info["source"]
-        loc_info = {"ap_name": info["ap_name"], "ap_site": info["ap_site"]}
-        if info["warning"]:
-            warnings.append(info["warning"])
+    budget = TimeBudget(S.rename_time_budget)
+    try:
+        if override:
+            location, location_source = override, "override"
+        else:
+            info = await anyio.to_thread.run_sync(uisp_location, ip, dev_id, mac, budget)
+            location, location_source = info["location"], info["source"]
+            loc_info = {"ap_name": info["ap_name"], "ap_site": info["ap_site"]}
+            if info["warning"]:
+                warnings.append(info["warning"])
+    except RenameError as e:
+        write_log({**entry, "result": "failed", "message": str(e)})
+        return respond(False, str(e), wid, e.status, name=name, ip=ip)
     entry.update(location=location, location_source=location_source)
     base = dict(name=name, ip=ip, dry_run=dry_run, location=location, location_source=location_source,
                 **loc_info)
@@ -808,9 +1099,9 @@ async def rename_cpe(request: Request):
         write_log({**entry, "result": "failed", "message": msg})
         return respond(False, msg, wid, 409, **base)
     try:
-        res = await anyio.to_thread.run_sync(cpe_rename_job, ip, name, location, dry_run)
+        res = await anyio.to_thread.run_sync(cpe_rename_job, ip, name, location, dry_run, budget)
     except RenameError as e:
-        extra = {**{"saved": False, "applied": False, "changed_keys": [], "keys": {}}, **e.extra}
+        extra = redact_community({**{"saved": False, "applied": False, "changed_keys": [], "keys": {}}, **e.extra})
         write_log({**entry, "result": "failed", "message": str(e), "changed_keys": extra["changed_keys"],
                    "saved": extra["saved"], "applied": extra["applied"]})
         return respond(False, str(e), wid, e.status, **base, state="failed", already_compliant=False,
@@ -839,6 +1130,7 @@ async def rename_cpe(request: Request):
         msg = f"Renamed {ip} to {name} and applied the CPE standard ({len(res['changed_keys'])} key(s) changed); link drops for a few seconds"
     if location_source == "none":
         msg += "; snmp.location NOT set (no location)"
-    write_log({**entry, "result": "success", "message": msg, "state": st, "changed_keys": res["changed_keys"],
-               "saved": res["saved"], "applied": res["applied"]})
-    return respond(True, msg, wid, **base, warnings=warnings, **res)
+    public = redact_community(res)
+    write_log({**entry, "result": "success", "message": msg, "state": st, "changed_keys": public["changed_keys"],
+               "saved": public["saved"], "applied": public["applied"]})
+    return respond(True, msg, wid, **base, warnings=warnings, **public)

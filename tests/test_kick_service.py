@@ -213,17 +213,30 @@ def ssh_env(tmp_path, monkeypatch):
         radio = FakeAirOSSSH(cfg=cfg, **kw)
         holder["radio"] = radio
         log = tmp_path / "kicks.jsonl"
+        known_hosts = tmp_path / "known_hosts"
         for k, v in {"WEBHOOK_SECRET": SECRET, "RADIO_USERNAME": "testuser", "RADIO_PASSWORD": "testpass",
                      "KICK_LOG": str(log),
-                     # /kick's allowlist. 127.0.0.1 is outside it on purpose: /rename-cpe must
-                     # still SSH there, because this endpoint has no allowlist of its own.
+                     # /kick's allowlist. 127.0.0.1 is outside it on purpose.
                      "ALLOWED_NETWORKS": "10.0.0.0/8",
                      "RADIO_SSH_PORT": str(radio.port), "RADIO_SSH_USER": "BTTW", "RADIO_SSH_PASSWORD": "sshpass",
                      "RADIO_SSH_CONNECT_TIMEOUT": "5", "RADIO_SSH_COMMAND_TIMEOUT": "10",
-                     "CPE_SOFTRESTART_TIMEOUT": "5", "UISP_API_TOKEN": ""}.items():
+                     "CPE_SOFTRESTART_TIMEOUT": "5", "UISP_API_TOKEN": "",
+                     # Less-secure test opt-in so the fake's key can be saved on first connect.
+                     "RADIO_SSH_HOST_KEY_POLICY": "accept-new",
+                     "RADIO_SSH_KNOWN_HOSTS": str(known_hosts)}.items():
             monkeypatch.setenv(k, v)
         import ssh_service
         importlib.reload(ssh_service)
+        # Production rejects loopback. The fake radio is on 127.0.0.1, so this
+        # fixture permits that one address and no other special address.
+        real_norm = ssh_service.norm_rename_ip
+
+        def allow_fake_loopback(value):
+            if str(value or "").strip() == "127.0.0.1":
+                return "127.0.0.1"
+            return real_norm(value)
+
+        ssh_service.norm_rename_ip = allow_fake_loopback
         return TestClient(ssh_service.app), radio, log
 
     yield make
@@ -293,6 +306,7 @@ def test_rename_verify_failure_no_save(ssh_env):
     r = rename(c)
     j = r.json()
     assert r.status_code == 502 and j["result"] == "failed" and "verify failed" in j["message"], j
+    assert "restored and verified" in j["message"]
     assert "snmp.location" in j["message"] and j["saved"] is False and j["applied"] is False
     assert radio.saved() is None and radio.restarts == 0
     assert not any(cmd.startswith("cfgmtd") for cmd in radio.commands)
@@ -392,12 +406,15 @@ def test_rename_connects_only_to_the_supplied_ip(ssh_env, monkeypatch):
 
 
 def test_rename_ip_has_no_allowlist(env):
-    """Any single IPv4 parses. Prefixes and junk are rejected with no socket opened."""
+    """Ordinary IPv4 addresses parse. Prefixes, junk, and special addresses do not."""
     import ssh_service
     assert not hasattr(ssh_service.S, "cpe_allowed_networks")
-    # Documentation address, outside ALLOWED_NETWORKS. Parsing does not connect.
+    # Documentation and private CPE addresses. Parsing does not connect.
     assert ssh_service.norm_rename_ip("203.0.113.50") == "203.0.113.50"
-    for bad in ("203.0.113.0/24", "notanip", "127.0.0.1,10.1.2.3", "", "  "):
+    assert ssh_service.norm_rename_ip("10.41.0.5") == "10.41.0.5"
+    assert ssh_service.norm_rename_ip("172.20.1.2") == "172.20.1.2"
+    for bad in ("203.0.113.0/24", "notanip", "127.0.0.1,10.1.2.3", "", "  ",
+                "0.0.0.0", "0.1.2.3", "127.0.0.1", "169.254.1.1", "224.0.0.1", "240.0.0.1"):
         with pytest.raises(ValueError):
             ssh_service.norm_rename_ip(bad)
 
@@ -455,7 +472,7 @@ def test_rename_location_from_uisp(ssh_env, monkeypatch):
     ap = {"identification": {"site": {"name": "03_PRYHUT"}}}
     seen = []
 
-    def fake_get(path):
+    def fake_get(path, budget=None):
         seen.append(path)
         return stations if path.startswith("/devices?") else ap
 
@@ -473,7 +490,7 @@ def test_rename_location_from_uisp(ssh_env, monkeypatch):
     seen.clear()
     stations_by_id = stations[0]
     monkeypatch.setattr(ssh_service, "_uisp_get",
-                        lambda p: (seen.append(p), stations_by_id if p.endswith("8865782f-3e30-4822-a268-2e9d9e84016e") else ap)[1])
+                        lambda p, budget=None: (seen.append(p), stations_by_id if p.endswith("8865782f-3e30-4822-a268-2e9d9e84016e") else ap)[1])
     j = c.post("/rename-cpe", json={"ip": "127.0.0.1", "name": "Mike Roberts", "dry_run": True,
                                     "uisp_device_id": "8865782f-3e30-4822-a268-2e9d9e84016e"}, headers=H).json()
     assert j["location"] == "HUT W" and seen[0] == "/devices/8865782f-3e30-4822-a268-2e9d9e84016e"
@@ -491,10 +508,252 @@ def test_rename_edit_command_quoting(ssh_env):
     c, radio, _ = ssh_env()
     import ssh_service
     cmd = ssh_service.edit_command({"resolv.host.1.name": "Mike-Roberts", "snmp.location": "HUT W"})
-    assert ssh_service.SET_FN in cmd and "s snmp.location 'HUT W'" in cmd
-    assert "cp $F /tmp/system.cfg.rename-bak && {" in cmd
+    assert "btwi-cfg-edit" in cmd and "s snmp.location 'HUT W'" in cmd
+    assert "rename-bak.tmp" in cmd and "mv " in cmd
+    assert "sed -i" not in cmd
     with pytest.raises(ValueError):
         ssh_service.edit_command({"snmp.location": "a|b"})
+
+
+def test_rename_rejects_special_addresses(env, monkeypatch):
+    """Special addresses are a 400 and never open a socket."""
+    import socket
+    blocked = []
+
+    def spy(self, address):
+        host = address[0] if isinstance(address, tuple) else address
+        blocked.append(str(host))
+        raise OSError("test blocked connect")
+
+    monkeypatch.setattr(socket.socket, "connect", spy)
+    c, _, _ = env
+    cases = {
+        "0.0.0.0": "0.x",
+        "0.8.8.8": "0.x",
+        "127.0.0.1": "loopback",
+        "127.255.255.1": "loopback",
+        "169.254.1.1": "link-local",
+        "224.0.0.1": "multicast",
+        "240.0.0.1": "reserved",
+        "255.255.255.255": "reserved",
+    }
+    for ip, snippet in cases.items():
+        r = c.post("/rename-cpe", json={"ip": ip, "name": "Mike Roberts", "snmp_location": "HUT W"}, headers=H)
+        assert r.status_code == 400, (ip, r.status_code, r.text)
+        body = r.json()
+        assert body["result"] == "failed"
+        assert snippet in body["message"], body
+    assert blocked == []
+
+
+def test_rename_host_key_default_refuses_password(ssh_env):
+    c, radio, _ = ssh_env(BORKED_CFG)
+    import ssh_service
+    ssh_service.S.radio_ssh_host_key_policy = "reject"
+    ssh_service.S.radio_ssh_known_hosts = ""
+    r = rename(c, dry_run=True)
+    assert r.status_code == 400, r.text
+    assert "Refusing to send the SSH password" in r.json()["message"]
+    assert radio.logins == 0 and radio.commands == []
+
+
+def test_rename_missing_known_hosts_file_is_clear(ssh_env, tmp_path):
+    c, radio, _ = ssh_env(BORKED_CFG)
+    import ssh_service
+    ssh_service.S.radio_ssh_host_key_policy = "reject"
+    ssh_service.S.radio_ssh_known_hosts = str(tmp_path / "does-not-exist")
+    r = rename(c, dry_run=True)
+    assert r.status_code == 400, r.text
+    assert "missing" in r.json()["message"].lower()
+    assert "500" not in r.json()["message"]
+    assert radio.logins == 0
+
+
+def test_rename_bare_ip_known_hosts_is_not_cannot_reach(ssh_env):
+    c, radio, _ = ssh_env(BORKED_CFG)
+    import ssh_service
+    key = radio.host_key
+    path = ssh_service.S.radio_ssh_known_hosts
+    with open(path, "w") as fh:
+        fh.write(f"127.0.0.1 {key.get_name()} {key.get_base64()}\n")
+    ssh_service.S.radio_ssh_host_key_policy = "reject"
+    r = rename(c, dry_run=True)
+    j = r.json()
+    assert r.status_code == 502, j
+    assert "host key" in j["message"].lower()
+    assert "not found" in j["message"].lower()
+    assert "cannot reach" not in j["message"].lower()
+    assert "[127.0.0.1]:" in j["message"]
+    assert radio.logins == 0
+
+
+def test_rename_pinned_host_key_allows_connect(ssh_env):
+    c, radio, _ = ssh_env(BORKED_CFG)
+    import ssh_service
+    key = radio.host_key
+    path = ssh_service.S.radio_ssh_known_hosts
+    with open(path, "w") as fh:
+        fh.write(f"[127.0.0.1]:{radio.port} {key.get_name()} {key.get_base64()}\n")
+    ssh_service.S.radio_ssh_host_key_policy = "reject"
+    j = rename(c, dry_run=True).json()
+    assert j["result"] == "success", j
+    assert radio.logins == 1
+
+
+def test_rename_accept_new_saves_then_rejects_changed_key(ssh_env):
+    c, radio, _ = ssh_env(BORKED_CFG)
+    import ssh_service
+    path = ssh_service.S.radio_ssh_known_hosts
+    assert ssh_service.S.radio_ssh_host_key_policy == "accept-new"
+    first = rename(c, dry_run=True).json()
+    assert first["result"] == "success", first
+    saved = open(path).read()
+    assert f"[127.0.0.1]:{radio.port}" in saved
+    second = rename(c, dry_run=True).json()
+    assert second["result"] == "success", second
+    radio.rotate_host_key()
+    r = rename(c, dry_run=True)
+    j = r.json()
+    assert r.status_code == 502, j
+    assert "does not match" in j["message"]
+    assert radio.logins == 2  # the changed key is rejected before a third login
+
+
+def test_rename_restore_is_honest_when_backup_is_gone(ssh_env):
+    c, radio, _ = ssh_env(BORKED_CFG, sabotage_key="snmp.location", drop_backup=True)
+    r = rename(c)
+    j = r.json()
+    assert r.status_code == 502, j
+    assert "verify failed" in j["message"]
+    assert "could not be verified" in j["message"]
+    assert "restored and verified" not in j["message"]
+    assert j["saved"] is False and j["applied"] is False
+    assert radio.saved() is None and radio.restarts == 0
+    assert "sabotaged" in radio.cfg()
+
+
+def test_rename_does_not_clobber_lookalike_keys(ssh_env):
+    cfg = "snmpXstatus=leave-me\nresolvXhost.1.name=leave-host\n" + BORKED_CFG
+    c, radio, _ = ssh_env(cfg)
+    j = rename(c).json()
+    assert j["result"] == "success", j
+    text = radio.cfg()
+    assert "snmpXstatus=leave-me" in text
+    assert "resolvXhost.1.name=leave-host" in text
+    assert "\nsnmp.status=enabled\n" in f"\n{text}"
+
+
+def test_uisp_redirect_is_not_followed(env, monkeypatch):
+    import ssh_service
+    calls = []
+
+    class Resp:
+        status_code = 302
+        headers = {"Location": "https://evil.example/steal"}
+        text = ""
+
+        def json(self):
+            raise AssertionError("redirect body must not be read")
+
+    def fake_get(url, headers=None, timeout=None, allow_redirects=True, **kwargs):
+        calls.append({"url": url, "allow_redirects": allow_redirects,
+                      "token": (headers or {}).get("x-auth-token")})
+        return Resp()
+
+    monkeypatch.setattr(ssh_service.S, "uisp_api_token", "super-secret-token")
+    monkeypatch.setattr(ssh_service.requests, "get", fake_get)
+    with pytest.raises(RuntimeError) as caught:
+        ssh_service._uisp_get("/devices?role=station")
+    assert "redirect" in str(caught.value).lower()
+    assert len(calls) == 1
+    assert calls[0]["allow_redirects"] is False
+    assert calls[0]["token"] == "super-secret-token"
+    assert "evil.example" not in calls[0]["url"]
+
+
+def test_rename_mac_must_match_supplied_ip(ssh_env, monkeypatch):
+    c, radio, _ = ssh_env(BORKED_CFG)
+    import ssh_service
+    monkeypatch.setattr(ssh_service.S, "uisp_api_token", "tok")
+    seen = []
+    stations = [{
+        "identification": {"id": "x", "mac": "70:a7:41:44:a8:b2"},
+        "ipAddress": "10.9.9.9",
+        "attributes": {"apDevice": {"id": "ap-1", "name": "BOTSECHUTW"}},
+    }]
+
+    def fake_get(path, budget=None):
+        seen.append(path)
+        if path.startswith("/devices?"):
+            return stations
+        raise AssertionError(f"must not look up another device for a MAC on a different IP: {path}")
+
+    monkeypatch.setattr(ssh_service, "_uisp_get", fake_get)
+    j = c.post("/rename-cpe", json={"ip": "127.0.0.1", "name": "Mike Roberts",
+                                    "mac": "70-A7-41-44-A8-B2", "dry_run": True}, headers=H).json()
+    assert j["result"] == "success", j
+    assert j["location"] is None and j["location_source"] == "none"
+    assert any("does not use 127.0.0.1" in w for w in j["warnings"])
+    assert seen == ["/devices?role=station"]
+    assert "snmp.location" not in j["keys"]
+
+
+def test_rename_redacts_snmp_community(ssh_env, monkeypatch):
+    c, radio, log = ssh_env(BORKED_CFG)
+    import ssh_service
+    monkeypatch.setattr(ssh_service.S, "cpe_snmp_community", "SuperSecretCommunity")
+    r = rename(c)
+    j = r.json()
+    assert j["result"] == "success", j
+    assert j["keys"]["snmp.community"] == {"before": "***", "after": "***", "target": "***"}
+    assert "SuperSecretCommunity" not in r.text
+    assert "SuperSecretCommunity" not in log.read_text()
+    assert "snmp.community=SuperSecretCommunity" in radio.cfg()
+
+
+def test_rename_time_budget_stops_before_save(ssh_env, monkeypatch):
+    c, radio, _ = ssh_env(BORKED_CFG, command_delay=3)
+    import ssh_service
+    monkeypatch.setattr(ssh_service.S, "rename_time_budget", 1)
+    r = rename(c)
+    j = r.json()
+    assert r.status_code == 504, j
+    assert "timed out" in j["message"].lower()
+    assert "restart" in j["message"].lower()
+    assert j["saved"] is False and j["applied"] is False
+    assert radio.restarts == 0
+    assert not any("cfgmtd" in cmd for cmd in radio.commands)
+    assert radio.cfg() == BORKED_CFG
+
+
+def test_kick_starts_when_syslog_ip_is_blank(tmp_path, monkeypatch):
+    import importlib
+    import socket
+    monkeypatch.setenv("WEBHOOK_SECRET", SECRET)
+    monkeypatch.setenv("RADIO_USERNAME", "testuser")
+    monkeypatch.setenv("RADIO_PASSWORD", "testpass")
+    monkeypatch.setenv("CPE_SYSLOG_IP", "")
+    monkeypatch.setenv("RADIO_SSH_PASSWORD", "sshpass")
+    monkeypatch.setenv("ALLOWED_NETWORKS", "127.0.0.0/8")
+    monkeypatch.setenv("KICK_LOG", str(tmp_path / "kicks.jsonl"))
+    import ssh_service
+    importlib.reload(ssh_service)
+    blocked = []
+
+    def spy(self, address):
+        host = address[0] if isinstance(address, tuple) else address
+        blocked.append(str(host))
+        raise OSError("test blocked connect")
+
+    monkeypatch.setattr(socket.socket, "connect", spy)
+    c = TestClient(ssh_service.app)
+    kick = c.post("/kick", json={"ip": "127.0.0.1", "mac": "aa:bb:cc:dd:ee:ff", "dry_run": True}, headers=H)
+    assert kick.status_code == 200, kick.text
+    rename_r = c.post("/rename-cpe", json={"ip": "203.0.113.10", "name": "Mike Roberts",
+                                           "snmp_location": "HUT W", "dry_run": True}, headers=H)
+    assert rename_r.status_code == 400, rename_r.text
+    assert "CPE_SYSLOG_IP" in rename_r.json()["message"]
+    assert blocked == []
 
 
 SANITIZE_CASES = [

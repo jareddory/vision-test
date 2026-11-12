@@ -104,7 +104,7 @@ On failure after the UISP rename succeeded (for example the radio push failed), 
 
 `ssh_service.py` serves this endpoint at `https://api.btwi.net/radio-kick/rename-cpe`. It is a per-call service, not a network crawl. Vision's webhook, or anyone with the secret, calls it with GET or POST. The call carries one radio's IP and the customer's name. The service SSHes into just that radio, sets the hostname from the Vision name, and applies the BTWI SNMP and syslog standard. It reads `/tmp/system.cfg` before the edit and checks the same keys again after the edit, before anything is saved.
 
-The single IP in the call is the only device this step will touch. The value has to be one IPv4 address. Malformed input and anything that is not a single IP (a prefix, a list, a hostname) is rejected, and no connection is opened.
+The single IP in the call is the only device this step will touch. The value has to be one IPv4 address. Malformed input and anything that is not a single IP (a prefix, a list, a hostname) is rejected, and no connection is opened. Loopback, link-local, multicast, reserved, unspecified, and 0.x addresses are rejected with HTTP 400. `0.0.0.0` and `127.0.0.1` would SSH back into this server. Ordinary private CPE addresses such as `10.x` and `172.20.x` are still accepted.
 
 ### Call inputs
 
@@ -114,7 +114,7 @@ The single IP in the call is the only device this step will touch. The value has
 | `name` | yes | Vision customer name. Whitespace becomes `-`, other punctuation is removed, max 32 characters (`Mike Roberts` becomes `Mike-Roberts`). |
 | `snmp_location` | no | SNMP location override, for example `HUT W`. When this is set, UISP is not consulted. |
 | `uisp_device_id` | no | UISP device id of this CPE. Used to look up the tower and sector when `snmp_location` is omitted. |
-| `mac` | no | CPE MAC. Used for the same tower and sector lookup when `uisp_device_id` is omitted. |
+| `mac` | no | CPE MAC. Used for the tower and sector lookup when `uisp_device_id` is omitted. The UISP device must also be using this call's IP. A MAC on a different IP is ignored and `snmp.location` is left unchanged. |
 | `workflow_id` | no | Vision workflow id. Echoed back and logged. |
 | `dry_run` | no | Reads the radio and returns the diff. The config is not changed, saved, or restarted. |
 
@@ -124,9 +124,17 @@ Auth matches `/kick`: `Authorization: Bearer <secret>`, the `X-Webhook-Secret` h
 
 These are process environment variables, not fields on the call. The template is `radio-kick.env.example` (placeholders only; the filled file stays off the repo).
 
-`RADIO_SSH_KNOWN_HOSTS` chooses how host keys are checked. Point it at an OpenSSH known_hosts file and unknown or changed keys are rejected. Leave it blank and the service accepts the radio's key the first time it connects.
+`RADIO_SSH_HOST_KEY_POLICY` chooses host-key handling. The default is `reject`. In that mode the service will not send the SSH password unless `RADIO_SSH_KNOWN_HOSTS` points at a file that already pins the key. A missing file is a clear HTTP 400, not an internal error. For port 11222 the known_hosts line has to be `[ip]:11222`. A bare IP line matches port 22 only, and the call fails with "host key ... was not found" instead of "cannot reach". A key that does not match the pinned key fails with "does not match". The password is not sent in either case.
 
-SSH login, port, timeouts, the SNMP community and contact, and the syslog collector are the other server settings (`RADIO_SSH_USER`, `RADIO_SSH_PASSWORD`, `RADIO_SSH_PORT`, `CPE_SNMP_COMMUNITY`, `CPE_SNMP_CONTACT`, `CPE_SYSLOG_IP`, `CPE_SYSLOG_PORT`). `UISP_BASE_URL` and `UISP_API_TOKEN` are used only for the optional tower and sector lookup (read-only GETs). With no token, and no `snmp_location` override, `snmp.location` is left as it is.
+`RADIO_SSH_HOST_KEY_POLICY=accept-new` is the less secure opt-in. The service saves the radio's key on the first connection into `RADIO_SSH_KNOWN_HOSTS`, then rejects a different key later. It does not trust a new key on every connection. Leave the policy unset, or set it to `reject`, to stay in the safe default.
+
+`CPE_SYSLOG_IP` is required only when `/rename-cpe` runs. `/kick` still starts when that variable is blank.
+
+SSH login, port, timeouts, the SNMP community and contact, and the syslog collector are the other server settings (`RADIO_SSH_USER`, `RADIO_SSH_PASSWORD`, `RADIO_SSH_PORT`, `CPE_SNMP_COMMUNITY`, `CPE_SNMP_CONTACT`, `CPE_SYSLOG_IP`, `CPE_SYSLOG_PORT`). `UISP_BASE_URL` and `UISP_API_TOKEN` are used only for the optional tower and sector lookup (read-only GETs). Those GETs do not follow redirects, so the API token is not sent to another host. With no token, and no `snmp_location` override, `snmp.location` is left as it is.
+
+The whole call, UISP lookups included, has to finish within `RENAME_TIME_BUDGET_SECONDS` (default 75). Past that the service returns a timeout, closes the SSH session, and does not start a save or soft restart. If a verify fails, the working copy is restored in a new SSH session and checked against the backup. The response says the restore was verified only when that check succeeds.
+
+The HTTP response redacts `snmp.community` values to `***`. The value is still written on the radio.
 
 ### What gets written
 
@@ -148,7 +156,7 @@ A dry run returns `state: dry_run` plus `changed_keys` and the before/after `key
 
 ### nginx
 
-nginx on api.btwi.net proxies `location /radio-kick/` to this service. The rename waits on SSH, `cfgmtd`, and the soft restart, which can take 20–60 seconds, so `proxy_read_timeout` on that location is `90s`. See `nginx-radio-kick.conf.example`.
+nginx on api.btwi.net proxies `location /radio-kick/` to this service. The rename waits on SSH, `cfgmtd`, and the soft restart, so `proxy_read_timeout` on that location is `90s` (see `nginx-radio-kick.conf.example`). The service's own budget is 75 seconds, so it reports a timeout before nginx closes the proxy.
 
 ### Example
 
