@@ -111,7 +111,7 @@ The single IP in the call is the only device this step will touch. The value has
 | field | required | notes |
 |---|---|---|
 | `ip` (alias `cpe_ip`, `radio_ip`) | yes | The one radio to SSH to. One IPv4 address. |
-| `name` | yes | Vision customer name. Whitespace becomes `-`, other punctuation is removed, max 32 characters (`Mike Roberts` becomes `Mike-Roberts`). |
+| `name` | yes | Vision customer name. Whitespace runs become a single space, other punctuation is removed, repeated spaces and dashes collapse, and the result is at most 32 characters (`Mike Roberts` stays `Mike Roberts`). airOS accepts that space in the device name. |
 | `snmp_location` | no | SNMP location override, for example `HUT W`. When this is set, UISP is not consulted. |
 | `uisp_device_id` | no | UISP device id of this CPE. Used to look up the tower and sector when `snmp_location` is omitted. |
 | `mac` | no | CPE MAC. Used for the tower and sector lookup when `uisp_device_id` is omitted. The UISP device must also be using this call's IP. A MAC on a different IP is ignored and `snmp.location` is left unchanged. |
@@ -153,6 +153,16 @@ Each changed key is replaced in place, or appended when the line is missing. `sn
 | `syslog.remote.port` | `514` (`CPE_SYSLOG_PORT`) |
 
 A dry run returns `state: dry_run` plus `changed_keys` and the before/after `keys` map. A radio that already matches returns `state: already_compliant` and does not save or restart. A real change returns `state: changed` with `saved` and `applied`.
+
+### UISP endpoint site
+
+After the radio is saved and the soft restart is applied, the service can rename the customer's UISP site (the endpoint map dot the CPE belongs to) to the same sanitized name. It does not rename the UISP device. The lookup is `uisp_device_id`, else MAC (that device's IP must be the IP in the call), else IP. `identification.site.type` must be `endpoint` or `client`. A tower site (`type` `site`) is left alone and the response includes a warning.
+
+The rename is `GET /sites/{id}` then `PUT /sites/{id}` with that same body and only `identification.name` changed, so address, location, and parent stay as they were. Redirects are not followed. Both calls use `UISP_WRITE_TOKEN`, or `UISP_API_TOKEN` when the write token is unset, and they count against `RENAME_TIME_BUDGET_SECONDS`.
+
+`UISP_RENAME_SITE` defaults to false. While it is off, or when no token is set, the site is skipped, a warning is added, and the radio result is still success. A UISP error does not fail the call and does not roll the radio back. The response field `site_rename` is `{state, site_id, before, after, message}` with `state` one of `renamed`, `unchanged`, `skipped`, or `failed`. A dry run GETs the site and does not PUT. When the name would change, `state` is `skipped` and `message` says what it would rename. When the name already matches, `state` is `unchanged`. Tokens are not logged.
+
+Confirm the PUT body against the live NMS swagger at `/nms/api-docs` before setting `UISP_RENAME_SITE` to true. The shape above matches UISP NMS v2.1 `SiteOverview`, and it still has to be checked on the running controller.
 
 ### nginx
 

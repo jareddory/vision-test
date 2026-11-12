@@ -73,7 +73,7 @@ class FakeAirOS:
 
 # airOS 8.7.25 style config, trimmed to the keys /rename-cpe touches plus a few neighbours
 SAMPLE_CFG = """aaa.status=disabled
-resolv.host.1.name=Mike-Roberts
+resolv.host.1.name=Mike Roberts
 resolv.host.1.status=enabled
 snmp.community=BTWI
 snmp.contact=BTWI

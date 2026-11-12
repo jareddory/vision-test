@@ -35,6 +35,7 @@ All settings come from environment variables (systemd EnvironmentFile
 """
 from __future__ import annotations
 
+import copy
 import hmac
 import ipaddress
 import json
@@ -116,6 +117,10 @@ class Settings:
         self.cpe_syslog_port = env.get("CPE_SYSLOG_PORT", "514")
         self.uisp_base_url = env.get("UISP_BASE_URL", "https://uisp.btwi.net/nms/api/v2.1").rstrip("/")
         self.uisp_api_token = env.get("UISP_API_TOKEN", "")
+        # Off until the PUT /sites body is confirmed against the live NMS swagger.
+        self.uisp_rename_site = _bool(env.get("UISP_RENAME_SITE"), False)
+        # Write calls prefer this token. Empty falls back to UISP_API_TOKEN.
+        self.uisp_write_token = env.get("UISP_WRITE_TOKEN", "")
         self.uisp_timeout = float(env.get("UISP_TIMEOUT", "30"))
         for k, v in (("CPE_SNMP_COMMUNITY", self.cpe_snmp_community), ("CPE_SNMP_CONTACT", self.cpe_snmp_contact),
                      ("CPE_SYSLOG_PORT", self.cpe_syslog_port)):
@@ -430,12 +435,19 @@ class RenameError(Exception):
 
 
 def sanitize_name(raw: Any) -> str:
-    """Vision customer name -> airOS device name: whitespace runs -> '-', keep [A-Za-z0-9-_.],
-    collapse '--', trim '-' both ends, max 32 chars. Raises ValueError when nothing is left."""
-    s = re.sub(r"\s+", "-", str(raw or "").strip())
-    s = re.sub(r"[^A-Za-z0-9\-_.]", "", s)
-    s = re.sub(r"-{2,}", "-", s).strip("-")
-    s = s[:32].strip("-")
+    """Vision customer name -> airOS device name.
+
+    Whitespace runs become one space. Keep [A-Za-z0-9 _.-], collapse repeated
+    spaces and dashes, strip leading and trailing space and '-', max 32 characters.
+    airOS 8.7.25 accepts a space in resolv.host.1.name. Raises ValueError when
+    nothing is left.
+    """
+    s = re.sub(r"\s+", " ", str(raw or "").strip())
+    s = re.sub(r"[^A-Za-z0-9 _.\-]", "", s)
+    s = re.sub(r" {2,}", " ", s)
+    s = re.sub(r"-{2,}", "-", s)
+    s = s.strip(" -")
+    s = s[:32].strip(" -")
     if not s:
         raise ValueError("name is empty after sanitizing (needs letters or digits)")
     check_sed_safe("name", s)
@@ -506,31 +518,78 @@ def derive_location(ap_name: str, site_name: str) -> tuple[str | None, str]:
     return f"{tower} {sector}", f"from AP {name} (site {site_name})"
 
 
-def _uisp_get(path: str, budget: "TimeBudget | None" = None) -> Any:
-    """GET one UISP path. Redirects are errors so the x-auth-token is not forwarded."""
+def _uisp_request(method: str, path: str, budget: "TimeBudget | None" = None,
+                  token: str | None = None, body: dict | None = None) -> Any:
+    """One UISP call. Redirects are errors so the x-auth-token is not forwarded.
+
+    `token` is sent only as a header and is never included in errors or logs.
+    """
+    auth = S.uisp_api_token if token is None else token
     read_timeout = S.uisp_timeout
     connect_timeout = S.connect_timeout
     if budget is not None:
         read_timeout = budget.slice(read_timeout)
         connect_timeout = min(connect_timeout, read_timeout)
+    url = f"{S.uisp_base_url}{path}"
+    headers = {"x-auth-token": auth, "accept": "application/json"}
+    timeout = (connect_timeout, read_timeout)
     try:
-        r = requests.get(f"{S.uisp_base_url}{path}", headers={"x-auth-token": S.uisp_api_token,
-                                                             "accept": "application/json"},
-                         timeout=(connect_timeout, read_timeout), allow_redirects=False)
-    except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"UISP unreachable ({type(e).__name__})")
+        if method == "GET":
+            r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=False)
+        elif method == "PUT":
+            r = requests.put(url, headers=headers, timeout=timeout, json=body, allow_redirects=False)
+        else:
+            raise RuntimeError(f"UISP method {method} is not used")
+    except requests.exceptions.RequestException:
+        raise RuntimeError(f"UISP unreachable ({method} {path.split('?')[0]})")
+    short = path.split("?")[0]
     if r.status_code in (301, 302, 303, 307, 308):
-        raise RuntimeError(
-            f"UISP {path.split('?')[0]} returned HTTP {r.status_code} redirect; not followed")
+        raise RuntimeError(f"UISP {short} returned HTTP {r.status_code} redirect; not followed")
+    if method == "PUT" and r.status_code in (200, 201, 204):
+        return None
     if r.status_code != 200:
-        raise RuntimeError(f"UISP {path.split('?')[0]} returned HTTP {r.status_code}")
+        raise RuntimeError(f"UISP {short} returned HTTP {r.status_code}")
     return r.json()
+
+
+def _uisp_get(path: str, budget: "TimeBudget | None" = None) -> Any:
+    """GET one UISP path with the read token. Redirects are not followed."""
+    return _uisp_request("GET", path, budget, None)
 
 
 def _device_ips(dev: dict) -> set[str]:
     ips = {str(dev.get("ipAddress") or "").split("/")[0]}
     ips |= {str(x).split("/")[0] for x in (dev.get("ipAddressList") or [])}
     return {ip for ip in ips if ip}
+
+
+# UISP site identification.type for a customer map dot. "site" is a tower and is never renamed.
+_ENDPOINT_SITE_TYPES = {"endpoint", "client"}
+
+
+def uisp_find_station(ip: str, device_id: str | None, mac: str | None, get) -> tuple[dict | None, str]:
+    """Find one station. `get(path)` performs the GET.
+
+    Order is uisp_device_id, else MAC, else IP. A MAC match counts only when that
+    device's IP is `ip`. Returns (device, error). error is empty when a device is returned.
+    """
+    if device_id:
+        return get(f"/devices/{device_id}"), ""
+    mac_ip_mismatch = False
+    for d in get("/devices?role=station"):
+        ident = d.get("identification") or {}
+        d_mac = (ident.get("mac") or "").lower()
+        d_ips = _device_ips(d)
+        if mac:
+            if d_mac == mac and ip in d_ips:
+                return d, ""
+            if d_mac == mac and ip not in d_ips:
+                mac_ip_mismatch = True
+        elif ip in d_ips:
+            return d, ""
+    if mac_ip_mismatch:
+        return None, f"UISP device for mac {mac} does not use {ip}"
+    return None, f"CPE not found in UISP by {'mac ' + mac if mac else 'ip ' + ip}"
 
 
 def uisp_location(ip: str, device_id: str | None, mac: str | None, budget: "TimeBudget | None" = None) -> dict:
@@ -544,30 +603,9 @@ def uisp_location(ip: str, device_id: str | None, mac: str | None, budget: "Time
         out["warning"] = "UISP_API_TOKEN not set; snmp.location skipped"
         return out
     try:
-        dev = None
-        if device_id:
-            dev = _uisp_get(f"/devices/{device_id}", budget)
-        else:
-            mac_ip_mismatch = False
-            for d in _uisp_get("/devices?role=station", budget):
-                ident = d.get("identification") or {}
-                d_mac = (ident.get("mac") or "").lower()
-                d_ips = _device_ips(d)
-                if mac:
-                    if d_mac == mac and ip in d_ips:
-                        dev = d
-                        break
-                    if d_mac == mac and ip not in d_ips:
-                        mac_ip_mismatch = True
-                elif ip in d_ips:
-                    dev = d
-                    break
-            if dev is None and mac_ip_mismatch:
-                out["warning"] = (f"UISP device for mac {mac} does not use {ip}; "
-                                  "snmp.location skipped")
-                return out
-        if not dev:
-            out["warning"] = f"CPE not found in UISP by {'mac ' + mac if mac else 'ip ' + ip}; snmp.location skipped"
+        dev, err = uisp_find_station(ip, device_id, mac, lambda path: _uisp_get(path, budget))
+        if err or not dev:
+            out["warning"] = f"{err or 'CPE not found in UISP'}; snmp.location skipped"
             return out
         ap = (dev.get("attributes") or {}).get("apDevice") or {}
         out["ap_name"] = ap.get("name") or ""
@@ -585,6 +623,84 @@ def uisp_location(ip: str, device_id: str | None, mac: str | None, budget: "Time
     else:
         out["warning"] = f"{note}; snmp.location skipped"
     return out
+
+
+def _site_rename_result(state: str, site_id: str, before: str | None, after: str | None, message: str) -> dict:
+    return {"state": state, "site_id": site_id, "before": before, "after": after, "message": message}
+
+
+def _device_site_ref(dev: dict) -> tuple[str, str]:
+    site = (dev.get("identification") or {}).get("site") or {}
+    if isinstance(site, str):
+        return site, ""
+    if not isinstance(site, dict):
+        return "", ""
+    return str(site.get("id") or ""), str(site.get("type") or "")
+
+
+def rename_customer_uisp_site(ip: str, name: str, device_id: str | None, mac: str | None,
+                              dry_run: bool, radio_saved: bool, radio_applied: bool,
+                              budget: "TimeBudget") -> tuple[dict, str]:
+    """Rename the customer's endpoint/client site. Never the device, never a tower.
+
+    Returns (site_rename, warning). A UISP error is reported here and does not raise,
+    so a finished radio rename is left in place. The token is not put in either value.
+    """
+    intended = name
+    if not S.uisp_rename_site:
+        msg = "UISP site rename is off (UISP_RENAME_SITE is not true)"
+        return _site_rename_result("skipped", "", None, intended, msg), msg
+    if not (dry_run or (radio_saved and radio_applied)):
+        msg = "radio was not changed; UISP site was not renamed"
+        return _site_rename_result("skipped", "", None, intended, msg), ""
+    token = (S.uisp_write_token or S.uisp_api_token or "").strip()
+    if not token:
+        msg = "UISP site rename skipped; set UISP_WRITE_TOKEN or UISP_API_TOKEN"
+        return _site_rename_result("skipped", "", None, intended, msg), msg
+    try:
+        dev, err = uisp_find_station(
+            ip, device_id, mac, lambda path: _uisp_request("GET", path, budget, token))
+        if err or not dev:
+            msg = err or "CPE not found in UISP"
+            return _site_rename_result("skipped", "", None, intended, msg), msg
+        site_id, site_type = _device_site_ref(dev)
+        if not site_id:
+            msg = "UISP device has no site; site was not renamed"
+            return _site_rename_result("skipped", "", None, intended, msg), msg
+        if site_type and site_type.lower() not in _ENDPOINT_SITE_TYPES:
+            msg = (f"UISP site {site_id} type is {site_type}; "
+                   "only an endpoint or client site is renamed")
+            return _site_rename_result("skipped", site_id, None, intended, msg), msg
+        site = _uisp_request("GET", f"/sites/{site_id}", budget, token)
+        if not isinstance(site, dict):
+            msg = f"UISP site {site_id} response was not an object"
+            return _site_rename_result("failed", site_id, None, intended, msg), msg
+        ident = site.get("identification") if isinstance(site.get("identification"), dict) else {}
+        if not site_type:
+            site_type = str(ident.get("type") or "")
+            if site_type.lower() not in _ENDPOINT_SITE_TYPES:
+                msg = (f"UISP site {site_id} type is {site_type or 'unknown'}; "
+                       "only an endpoint or client site is renamed")
+                return _site_rename_result("skipped", site_id, None, intended, msg), msg
+        before = ident.get("name") if isinstance(ident.get("name"), str) else ""
+        if before == intended:
+            return _site_rename_result("unchanged", site_id, before, intended,
+                                       "UISP site name already matches"), ""
+        if dry_run:
+            msg = f"dry run: would rename the endpoint site from {before!r} to {intended!r}; no PUT sent"
+            return _site_rename_result("skipped", site_id, before, intended, msg), ""
+        payload = copy.deepcopy(site)
+        if not isinstance(payload.get("identification"), dict):
+            payload["identification"] = {}
+        payload["identification"]["name"] = intended
+        _uisp_request("PUT", f"/sites/{site_id}", budget, token, payload)
+        return _site_rename_result("renamed", site_id, before, intended, "UISP endpoint site renamed"), ""
+    except (RuntimeError, RenameError) as e:
+        msg = str(e)
+        return _site_rename_result("failed", "", None, intended, msg), msg
+    except Exception:
+        msg = "UISP site rename failed"
+        return _site_rename_result("failed", "", None, intended, msg), msg
 
 
 def parse_cfg(text: str) -> dict[str, list[str]]:
@@ -1130,7 +1246,14 @@ async def rename_cpe(request: Request):
         msg = f"Renamed {ip} to {name} and applied the CPE standard ({len(res['changed_keys'])} key(s) changed); link drops for a few seconds"
     if location_source == "none":
         msg += "; snmp.location NOT set (no location)"
+    site_rename, site_warning = rename_customer_uisp_site(
+        ip, name, dev_id, mac, dry_run, bool(res.get("saved")), bool(res.get("applied")), budget)
+    if site_warning:
+        warnings.append(site_warning)
+    res["site_rename"] = site_rename
     public = redact_community(res)
     write_log({**entry, "result": "success", "message": msg, "state": st, "changed_keys": public["changed_keys"],
-               "saved": public["saved"], "applied": public["applied"]})
+               "saved": public["saved"], "applied": public["applied"],
+               "site_rename": (public.get("site_rename") or {}).get("state"),
+               "site_id": (public.get("site_rename") or {}).get("site_id")})
     return respond(True, msg, wid, **base, warnings=warnings, **public)

@@ -2,7 +2,7 @@
 Tests for ssh_service.py against fake_airos.py on 127.0.0.1. No real radio is contacted.
 Run: pytest -q tests/test_kick_service.py
 """
-import importlib, json, os, re, sys
+import http.server, importlib, json, os, re, sys, threading, urllib.parse
 import pytest
 from fastapi.testclient import TestClient
 
@@ -171,7 +171,7 @@ def test_vision_wrong_body_secret(env):
 # ====================================================================== /rename-cpe (SSH)
 from fake_airos import FakeAirOSSSH, SAMPLE_CFG
 
-STD = {"resolv.host.1.name": "Mike-Roberts", "snmp.status": "enabled", "snmp.community": "BTWI",
+STD = {"resolv.host.1.name": "Mike Roberts", "snmp.status": "enabled", "snmp.community": "BTWI",
        "snmp.contact": "BTWI", "snmp.location": "HUT W", "syslog.status": "enabled",
        "syslog.remote.status": "enabled", "syslog.remote.ip": "10.55.12.244", "syslog.remote.port": "514"}
 
@@ -449,7 +449,7 @@ def test_rename_bad_input_rejected(ssh_env):
 def test_rename_name_with_symbols_is_sanitized(ssh_env):
     c, radio, _ = ssh_env(BORKED_CFG)
     j = rename(c, name="Mike & Sue O'Roberts | Farm", dry_run=True).json()
-    assert j["name"] == "Mike-Sue-ORoberts-Farm"
+    assert j["name"] == "Mike Sue ORoberts Farm"
 
 
 def test_rename_no_location_skips_key(ssh_env, monkeypatch):
@@ -507,8 +507,9 @@ def test_rename_missing_ssh_password(ssh_env, monkeypatch):
 def test_rename_edit_command_quoting(ssh_env):
     c, radio, _ = ssh_env()
     import ssh_service
-    cmd = ssh_service.edit_command({"resolv.host.1.name": "Mike-Roberts", "snmp.location": "HUT W"})
+    cmd = ssh_service.edit_command({"resolv.host.1.name": "Sam Hochstetler", "snmp.location": "HUT W"})
     assert "btwi-cfg-edit" in cmd and "s snmp.location 'HUT W'" in cmd
+    assert "s resolv.host.1.name 'Sam Hochstetler'" in cmd
     assert "rename-bak.tmp" in cmd and "mv " in cmd
     assert "sed -i" not in cmd
     with pytest.raises(ValueError):
@@ -756,17 +757,237 @@ def test_kick_starts_when_syslog_ip_is_blank(tmp_path, monkeypatch):
     assert blocked == []
 
 
+class FakeUisp:
+    """Local stand-in for UISP NMS. Never points at a real controller."""
+
+    def __init__(self, devices, site, put_status=200):
+        self.devices = devices
+        self.site = site
+        self.put_status = put_status
+        self.calls = []
+        fake = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _send(self, code, obj):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _record(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(n) if n else b""
+                body = json.loads(raw) if raw else None
+                path = urllib.parse.urlsplit(self.path).path
+                fake.calls.append({
+                    "method": self.command,
+                    "path": path,
+                    "token": self.headers.get("x-auth-token"),
+                    "body": body,
+                })
+                return path, body
+
+            def do_GET(self):
+                path, _ = self._record()
+                if path.startswith("/devices"):
+                    ident = path.rstrip("/").split("/")[-1]
+                    if ident == "devices":
+                        return self._send(200, fake.devices)
+                    for dev in fake.devices:
+                        if (dev.get("identification") or {}).get("id") == ident:
+                            return self._send(200, dev)
+                    return self._send(404, {"message": "not found"})
+                if path.startswith("/sites/"):
+                    site_id = path.rstrip("/").split("/")[-1]
+                    got = (fake.site.get("identification") or {}).get("id")
+                    if site_id == got:
+                        return self._send(200, fake.site)
+                    return self._send(404, {"message": "not found"})
+                return self._send(404, {"message": "not found"})
+
+            def do_PUT(self):
+                path, body = self._record()
+                if path.startswith("/sites/") and fake.put_status == 200 and isinstance(body, dict):
+                    fake.site = body
+                self._send(fake.put_status, {"message": "put"})
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _station(site_type="endpoint", site_id="site-1", site_name="Old Customer"):
+    return {
+        "identification": {
+            "id": "dev-1",
+            "mac": "70:a7:41:44:a8:b2",
+            "site": {"id": site_id, "name": site_name, "type": site_type},
+        },
+        "ipAddress": "127.0.0.1",
+    }
+
+
+def _site(name="Old Customer", site_id="site-1", site_type="endpoint"):
+    return {
+        "identification": {
+            "id": site_id,
+            "name": name,
+            "type": site_type,
+            "parent": {"id": "tower-1"},
+        },
+        "description": {
+            "address": "123 Farm Road",
+            "location": {"latitude": 41.5, "longitude": -93.6},
+            "height": 4,
+        },
+    }
+
+
+def _arm_site_rename(monkeypatch, fake, write_token="write-token-test", api_token="", enabled=True):
+    import ssh_service
+    monkeypatch.setattr(ssh_service.S, "uisp_base_url", fake.base)
+    monkeypatch.setattr(ssh_service.S, "uisp_rename_site", enabled)
+    monkeypatch.setattr(ssh_service.S, "uisp_write_token", write_token)
+    monkeypatch.setattr(ssh_service.S, "uisp_api_token", api_token)
+
+
+def test_uisp_site_rename_endpoint(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site())
+    try:
+        c, radio, log = ssh_env(BORKED_CFG)
+        _arm_site_rename(monkeypatch, fake, write_token="write-token-test", api_token="read-token-test")
+        r = rename(c)
+        j = r.json()
+        assert j["result"] == "success" and j["saved"] and j["applied"], j
+        assert j["site_rename"]["state"] == "renamed"
+        assert j["site_rename"]["site_id"] == "site-1"
+        assert j["site_rename"]["before"] == "Old Customer"
+        assert j["site_rename"]["after"] == "Mike Roberts"
+        puts = [call for call in fake.calls if call["method"] == "PUT"]
+        assert len(puts) == 1
+        assert puts[0]["path"] == "/sites/site-1"
+        assert puts[0]["token"] == "write-token-test"
+        body = puts[0]["body"]
+        assert body["identification"]["name"] == "Mike Roberts"
+        assert body["identification"]["parent"] == {"id": "tower-1"}
+        assert body["description"]["address"] == "123 Farm Road"
+        assert body["description"]["location"] == {"latitude": 41.5, "longitude": -93.6}
+        assert not any(call["method"] == "PUT" and call["path"].startswith("/devices") for call in fake.calls)
+        assert all(call["token"] == "write-token-test" for call in fake.calls)
+        raw = r.text + log.read_text()
+        assert "write-token-test" not in raw and "read-token-test" not in raw
+        assert_standard(radio.cfg())
+    finally:
+        fake.close()
+
+
+def test_uisp_site_rename_skips_tower(ssh_env, monkeypatch):
+    fake = FakeUisp([_station(site_type="site", site_id="tower-9", site_name="03_PRYHUT")],
+                    _site(name="03_PRYHUT", site_id="tower-9", site_type="site"))
+    try:
+        c, radio, _ = ssh_env(BORKED_CFG)
+        _arm_site_rename(monkeypatch, fake)
+        j = rename(c).json()
+        assert j["result"] == "success" and j["applied"], j
+        assert j["site_rename"]["state"] == "skipped"
+        assert j["site_rename"]["site_id"] == "tower-9"
+        assert any("endpoint" in w for w in j["warnings"])
+        assert not any(call["method"] == "PUT" for call in fake.calls)
+        assert not any(call["path"].startswith("/sites/") for call in fake.calls)
+        assert_standard(radio.cfg())
+    finally:
+        fake.close()
+
+
+def test_uisp_site_rename_dry_run_does_not_put(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site())
+    try:
+        c, radio, _ = ssh_env(BORKED_CFG)
+        _arm_site_rename(monkeypatch, fake)
+        j = rename(c, dry_run=True).json()
+        assert j["result"] == "success" and j["dry_run"] is True, j
+        assert j["site_rename"]["before"] == "Old Customer"
+        assert j["site_rename"]["after"] == "Mike Roberts"
+        assert "would rename" in j["site_rename"]["message"]
+        assert "no PUT" in j["site_rename"]["message"]
+        assert not any(call["method"] == "PUT" for call in fake.calls)
+        assert any(call["method"] == "GET" and call["path"] == "/sites/site-1" for call in fake.calls)
+        assert radio.cfg() == BORKED_CFG
+    finally:
+        fake.close()
+
+
+def test_uisp_site_rename_disabled_skips_without_calling(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site())
+    try:
+        c, radio, _ = ssh_env(BORKED_CFG)
+        _arm_site_rename(monkeypatch, fake, enabled=False)
+        j = rename(c).json()
+        assert j["result"] == "success", j
+        assert j["site_rename"]["state"] == "skipped"
+        assert any("UISP_RENAME_SITE" in w for w in j["warnings"])
+        assert fake.calls == []
+        assert_standard(radio.cfg())
+    finally:
+        fake.close()
+
+
+def test_uisp_site_rename_error_keeps_radio_success(ssh_env, monkeypatch):
+    fake = FakeUisp([_station()], _site(), put_status=500)
+    try:
+        c, radio, _ = ssh_env(BORKED_CFG)
+        _arm_site_rename(monkeypatch, fake)
+        r = rename(c)
+        j = r.json()
+        assert r.status_code == 200 and j["result"] == "success", j
+        assert j["saved"] and j["applied"]
+        assert j["site_rename"]["state"] == "failed"
+        assert "500" in j["site_rename"]["message"]
+        assert_standard(radio.cfg())
+        assert fake.site["identification"]["name"] == "Old Customer"
+    finally:
+        fake.close()
+
+
+def test_uisp_site_rename_unchanged_when_name_matches(ssh_env, monkeypatch):
+    fake = FakeUisp([_station(site_name="Mike Roberts")], _site(name="Mike Roberts"))
+    try:
+        c, radio, log = ssh_env(BORKED_CFG)
+        _arm_site_rename(monkeypatch, fake, write_token="", api_token="api-token-test")
+        j = rename(c).json()
+        assert j["result"] == "success" and j["applied"], j
+        assert j["site_rename"]["state"] == "unchanged"
+        assert j["site_rename"]["before"] == "Mike Roberts"
+        assert j["site_rename"]["after"] == "Mike Roberts"
+        assert not any(call["method"] == "PUT" for call in fake.calls)
+        assert fake.calls and all(call["token"] == "api-token-test" for call in fake.calls)
+        assert "api-token-test" not in log.read_text()
+        assert_standard(radio.cfg())
+    finally:
+        fake.close()
+
+
 SANITIZE_CASES = [
-    ("Mike Roberts", "Mike-Roberts"),
-    ("  Mike   Roberts  ", "Mike-Roberts"),
-    ("Mike\tRoberts\nJr.", "Mike-Roberts-Jr."),
-    ("O'Brien, Pat & Sue", "OBrien-Pat-Sue"),
-    ("Smith -- Farm", "Smith-Farm"),
+    ("Mike Roberts", "Mike Roberts"),
+    ("Sam Hochstetler", "Sam Hochstetler"),
+    ("  Mike   Roberts  ", "Mike Roberts"),
+    ("Mike\tRoberts\nJr.", "Mike Roberts Jr."),
+    ("O'Brien, Pat & Sue", "OBrien Pat Sue"),
+    ("Smith -- Farm", "Smith - Farm"),
     ("--Edge--", "Edge"),
-    ("José Núñez", "Jos-Nez"),
+    ("José Núñez", "Jos Nez"),
     ("Under_score.ok", "Under_score.ok"),
     ("A" * 40, "A" * 32),
-    ("ABCDEFGHIJKLMNOPQRSTUVWXYZ12345 X", "ABCDEFGHIJKLMNOPQRSTUVWXYZ12345"),  # trailing '-' trimmed after cut
+    ("ABCDEFGHIJKLMNOPQRSTUVWXYZ12345 X", "ABCDEFGHIJKLMNOPQRSTUVWXYZ12345"),  # trailing space trimmed after cut
 ]
 
 
