@@ -45,6 +45,7 @@ When result equals failed, create the manual task.
 - /device-status (GET/POST) — Detailed status. Params: mac, ip
 - /signal-history (GET/POST) — Signal statistics. Params: mac, ip, interval
 - /health (GET) — Health check (no auth)
+- /twilio/inbound (POST) — Inbound SMS from Twilio. Validates X-Twilio-Signature, forwards JSON to the chief webhook, and returns empty TwiML. See Inbound SMS below.
 
 ### Common parameters
 
@@ -115,6 +116,73 @@ On failure after the UISP rename succeeded (for example the radio push failed), 
 - RENAME_PUSH_HOSTNAME (optional) — true/false master switch for the /rename-cpe radio hostname push. Default true
 - RENAME_HOSTNAME_AIROS_TYPES (optional) — Comma list of UISP device types that get the airOS hostname push. Default airMax
 - RENAME_HOSTNAME_SPACE_CHAR (optional) — Replaces each whitespace run when building the /rename-cpe radio hostname. Default "-". Characters outside [A-Za-z0-9-_.] are still removed, so the value should be one of those. The UISP alias is not affected.
+- TWILIO_AUTH_TOKEN — Twilio auth token for POST /twilio/inbound signature checks. See Inbound SMS below.
+- TWILIO_WEBHOOK_PUBLIC_URL (optional) — Exact public URL Twilio signed. See Inbound SMS below.
+- CHIEF_WEBHOOK_URL — Where /twilio/inbound forwards the SMS JSON.
+- CHIEF_WEBHOOK_KEY — Secret sent on the forward request.
+- CHIEF_WEBHOOK_KEY_HEADER (optional) — Forward header name. Default Authorization.
+- CHIEF_WEBHOOK_KEY_FORMAT (optional) — Forward header value template. Default `Bearer {key}`.
+
+## Inbound SMS (/twilio/inbound)
+
+Twilio POSTs `application/x-www-form-urlencoded` here when a text arrives. The route checks `X-Twilio-Signature` with the official Twilio `RequestValidator` and `TWILIO_AUTH_TOKEN`, forwards a JSON summary to the chief webhook, and answers with empty TwiML so Twilio does not send an auto-reply.
+
+Public URL to paste into Twilio (phone number or Messaging Service → Messaging → "A message comes in", HTTP POST):
+
+https://vision-test-yz19.onrender.com/twilio/inbound
+
+The route lives on the `uisp_service` app (`uvicorn uisp_service:app --host 0.0.0.0 --port $PORT`).
+
+### Signature URL
+
+Render sits behind a proxy, so the app's own request URL is not the URL Twilio signed.
+
+- When `TWILIO_WEBHOOK_PUBLIC_URL` is set, that value is the full URL used for validation. Set it to the exact URL configured in Twilio, including a query string if the Twilio URL has one.
+- When it is unset, the URL is rebuilt from `X-Forwarded-Proto`, then `X-Forwarded-Host` or `Host`, plus the path and query.
+
+A missing `TWILIO_AUTH_TOKEN`, a missing `X-Twilio-Signature`, or a signature that does not match returns 403 and does not forward.
+
+### Forwarded JSON
+
+POST to `CHIEF_WEBHOOK_URL` with a 10 second timeout:
+
+- `from`, `to`, `body`, `message_sid` — Twilio `From`, `To`, `Body`, `MessageSid`
+- `num_media` — `NumMedia` as an integer
+- `media_urls` — list of `{url, content_type}` from `MediaUrl0..N` and the matching `MediaContentType`
+- `received_at` — UTC time the service accepted the webhook, ISO-8601
+
+The chief key is a request header. The header name is `CHIEF_WEBHOOK_KEY_HEADER` (default `Authorization`). The header value is `CHIEF_WEBHOOK_KEY_FORMAT` with `{key}` replaced by `CHIEF_WEBHOOK_KEY` (default `Bearer {key}`), so the routine panel's header format can be matched from the environment.
+
+### Response
+
+Success, including a failed forward, is HTTP 200 with `Content-Type: text/xml` and this body:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?><Response/>
+```
+
+`X-Forward-Status` is `forwarded` or `failed`. A failed forward is logged with the HTTP status code only. The chief key and the message body are not written to the log. The route still returns 200 so Twilio does not retry-storm.
+
+### Cold starts
+
+The Render free plan spins this service down after a period of inactivity, and the next request has to cold-start before the route can answer. Twilio's webhook timeout is 15 seconds, so the first text after an idle period may time out. A text sent once the service is awake should go through.
+
+### Environment variables
+
+- `TWILIO_AUTH_TOKEN` — Auth token Twilio uses to sign webhooks. Required for this route. Stored as an environment variable. If it is unset, the route returns 403.
+- `TWILIO_WEBHOOK_PUBLIC_URL` — Optional full public URL to validate against.
+- `CHIEF_WEBHOOK_URL` — Chief webhook that receives the JSON.
+- `CHIEF_WEBHOOK_KEY` — Secret sent in the forward header.
+- `CHIEF_WEBHOOK_KEY_HEADER` — Optional header name. Default `Authorization`.
+- `CHIEF_WEBHOOK_KEY_FORMAT` — Optional header value template. `{key}` is replaced with `CHIEF_WEBHOOK_KEY`. Default `Bearer {key}`.
+
+### Signed sample after deploy
+
+`scripts/sign_twilio_sample.py` reads `TWILIO_AUTH_TOKEN` from the environment (it is not printed) and prints a curl command with a valid `X-Twilio-Signature` for the URL you pass. That URL has to be the same string the service validates (the Twilio webhook URL, or `TWILIO_WEBHOOK_PUBLIC_URL` when that is set).
+
+```bash
+TWILIO_AUTH_TOKEN=your_token python scripts/sign_twilio_sample.py https://vision-test-yz19.onrender.com/twilio/inbound
+```
 
 ## Deployment
 

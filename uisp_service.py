@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 # UISP Service
-# Last updated: 2026-11-11
-# Changes: /rename-cpe keeps going when UISP saves the alias but returns an error
+# Last updated: 2026-11-14
+# Changes: POST /twilio/inbound validates X-Twilio-Signature and forwards inbound SMS
+#          to the chief webhook, then returns empty TwiML.
+#          /rename-cpe keeps going when UISP saves the alias but returns an error
 #          (422 "Failed to update wireless device hostname by alias."), then pushes
 #          a sanitized airOS hostname. The UISP alias is stored exactly as sent.
 #          /cancel-cpe is delete-only. It does not check reachability and does not reboot.
 #          Vision owns reboot and manual kick-on-fail before calling cancel.
 #          find_device_cancel identity rules and empty-site delete are unchanged.
 import os, re, ipaddress, logging, time
+from datetime import datetime, timezone
 from typing import Any, List
+from urllib.parse import parse_qsl
 import requests
 from fastapi import FastAPI, Request, HTTPException, Header
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from twilio.request_validator import RequestValidator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("uisp")
@@ -580,3 +585,183 @@ async def rename_cpe(request: Request, x_webhook_secret: str | None = Header(Non
 @app.get("/health")
 def health():
     return {"result": "success", "status": "ok"}
+
+# Inbound SMS forwarding. Empty TwiML so Twilio does not auto-reply.
+TWIML_EMPTY = '<?xml version="1.0" encoding="UTF-8"?><Response/>'
+CHIEF_FORWARD_TIMEOUT = 10
+MAX_TWILIO_MEDIA = 20
+
+
+def _forwarded_first(value: str | None) -> str:
+    if not value:
+        return ""
+    return value.split(",")[0].strip()
+
+
+def twilio_validation_url(request: Request) -> str:
+    """URL Twilio signed: the configured public URL, or the proxy-facing URL.
+
+    Render terminates TLS in front of the app, so request.url is the internal
+    address. TWILIO_WEBHOOK_PUBLIC_URL, when set, is used exactly. Otherwise the
+    URL is scheme + host + path + query from X-Forwarded-Proto, X-Forwarded-Host
+    or Host.
+    """
+    configured = os.getenv("TWILIO_WEBHOOK_PUBLIC_URL", "").strip()
+    if configured:
+        return configured
+    proto = _forwarded_first(request.headers.get("x-forwarded-proto")) or request.url.scheme
+    host = (
+        _forwarded_first(request.headers.get("x-forwarded-host"))
+        or _forwarded_first(request.headers.get("host"))
+        or request.url.netloc
+    )
+    url = f"{proto.lower()}://{host}{request.url.path}"
+    if request.url.query:
+        url += "?" + request.url.query
+    return url
+
+
+def twilio_form_params(request_body: bytes) -> dict:
+    text = request_body.decode("utf-8")
+    return dict(parse_qsl(text, keep_blank_values=True))
+
+
+def twilio_signature_ok(url: str, params: dict, signature: str, token: str) -> bool:
+    try:
+        return bool(RequestValidator(token).validate(url, params, signature))
+    except Exception:
+        return False
+
+
+def collect_media(params: dict) -> tuple:
+    """NumMedia plus MediaUrl0..N paired with MediaContentType0..N."""
+    raw = str(params.get("NumMedia", "")).strip()
+    declared = None
+    if raw:
+        try:
+            declared = int(raw)
+        except ValueError:
+            declared = None
+    if declared is not None and declared < 0:
+        declared = 0
+    limit = min(declared if declared is not None else MAX_TWILIO_MEDIA, MAX_TWILIO_MEDIA)
+    items = []
+    for i in range(limit):
+        url_key = f"MediaUrl{i}"
+        type_key = f"MediaContentType{i}"
+        if url_key not in params and type_key not in params:
+            if declared is None:
+                break
+            continue
+        items.append({
+            "url": str(params.get(url_key, "")),
+            "content_type": str(params.get(type_key, "")),
+        })
+    num_media = declared if declared is not None else len(items)
+    return num_media, items
+
+
+def chief_key_header() -> tuple:
+    """Header name and value for the chief webhook key.
+
+    CHIEF_WEBHOOK_KEY_HEADER defaults to Authorization.
+    CHIEF_WEBHOOK_KEY_FORMAT defaults to "Bearer {key}"; "{key}" is replaced
+    with CHIEF_WEBHOOK_KEY.
+    """
+    name = os.getenv("CHIEF_WEBHOOK_KEY_HEADER")
+    if name is None or name.strip() == "":
+        name = "Authorization"
+    else:
+        name = name.strip()
+    fmt = os.getenv("CHIEF_WEBHOOK_KEY_FORMAT")
+    if fmt is None or fmt == "":
+        fmt = "Bearer {key}"
+    key = os.getenv("CHIEF_WEBHOOK_KEY") or ""
+    return name, fmt.replace("{key}", key)
+
+
+def twilio_forbidden(reason: str) -> Response:
+    # reason is a fixed label (missing_auth_token, missing_signature, bad_signature).
+    log.info("twilio inbound rejected reason=%s", reason)
+    return Response(content="Forbidden", status_code=403, media_type="text/plain")
+
+
+def twiml_response(forward_status: str) -> Response:
+    return Response(
+        content=TWIML_EMPTY,
+        status_code=200,
+        media_type="text/xml",
+        headers={
+            "Content-Type": "text/xml",
+            "X-Forward-Status": forward_status,
+        },
+    )
+
+
+def forward_inbound_sms(payload: dict) -> str:
+    """POST the inbound SMS JSON to the chief webhook.
+
+    Returns "forwarded" or "failed". On failure, log the HTTP status code only.
+    """
+    url = os.getenv("CHIEF_WEBHOOK_URL", "").strip()
+    if not url:
+        log.warning("twilio inbound forward failed status=%s", "none")
+        return "failed"
+    header_name, header_value = chief_key_header()
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            headers={header_name: header_value},
+            timeout=CHIEF_FORWARD_TIMEOUT,
+        )
+    except Exception:
+        log.warning("twilio inbound forward failed status=%s", "none")
+        return "failed"
+    if not 200 <= resp.status_code < 300:
+        log.warning("twilio inbound forward failed status=%s", resp.status_code)
+        return "failed"
+    return "forwarded"
+
+
+def inbound_sms_payload(params: dict) -> dict:
+    num_media, media_urls = collect_media(params)
+    received_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "from": params.get("From", ""),
+        "to": params.get("To", ""),
+        "body": params.get("Body", ""),
+        "num_media": num_media,
+        "media_urls": media_urls,
+        "message_sid": params.get("MessageSid", ""),
+        "received_at": received_at,
+    }
+
+
+@app.post("/twilio/inbound")
+async def twilio_inbound(request: Request):
+    """Accept Twilio's inbound-message webhook and forward it.
+
+    Validates X-Twilio-Signature with TWILIO_AUTH_TOKEN. Forwards from, to, body,
+    num_media, media_urls, message_sid, and received_at to CHIEF_WEBHOOK_URL.
+    Always answers with empty TwiML on success so Twilio sends no auto-reply.
+    Forward failures still return that 200, with X-Forward-Status: failed.
+    """
+    token = os.getenv("TWILIO_AUTH_TOKEN")
+    if token is None or token.strip() == "":
+        return twilio_forbidden("missing_auth_token")
+    signature = (request.headers.get("x-twilio-signature") or "").strip()
+    if not signature:
+        return twilio_forbidden("missing_signature")
+    try:
+        params = twilio_form_params(await request.body())
+    except UnicodeDecodeError:
+        return twilio_forbidden("bad_signature")
+    if not twilio_signature_ok(twilio_validation_url(request), params, signature, token.strip()):
+        return twilio_forbidden("bad_signature")
+    payload = inbound_sms_payload(params)
+    forward_status = forward_inbound_sms(payload)
+    if forward_status == "forwarded":
+        sid = "".join(ch for ch in str(payload.get("message_sid") or "") if ch.isalnum())[:34] or "-"
+        log.info("twilio inbound accepted message_sid=%s forward=%s", sid, forward_status)
+    return twiml_response(forward_status)
